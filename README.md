@@ -11,17 +11,17 @@
 <h1 align="center">Jailbreak</h1>
 
 <p align="center">
-  A domain-organized library of reverse engineering playbooks, patchers, and research notes for software you own or are authorized to modify.
+  A domain-organized library of reverse engineering playbooks, guides, and research notes for software you own or are authorized to modify.
 </p>
 
 ## What this repository is
 
-Jailbreak is a structure, not a list. Every project lives in its own folder under a domain, with a repeatable playbook and, when useful, a working patcher or source.
+Jailbreak is a structure, not a list. Every project lives in its own folder under a domain, with a repeatable playbook and, when useful, source that a user builds locally.
 
 - `playbook.md`: how to analyze the target and recreate the patch
 - `README.md`: project scope, status, and quick start
-- `patcher/`: optional tooling, source, and build notes
-- `legacy/`: optional old scripts or notes
+- `patcher/src/` or `src/`: optional source, built locally when a project publishes it
+- `legacy/`: optional source only, no binaries
 
 The root README stays generic. Projects are discovered by browsing `domains/`, not by reading a fixed list here.
 
@@ -55,8 +55,8 @@ jailbreak/
       <project>/
         README.md
         playbook.md
-        patcher/ (source only, built locally)
-        legacy/
+        patcher/src/ (optional source only)
+        legacy/ (optional source only)
 ```
 
 ## Use a project
@@ -64,7 +64,7 @@ jailbreak/
 1. Open `domains/` and choose a domain.
 2. Open the project folder and read its `README.md`.
 3. Follow the playbook to recreate the patch.
-4. Build any patcher locally from the source; compiled patchers are not shipped.
+4. If the project includes source, build it locally; compiled patchers and pre-patched binaries are not shipped.
 5. Verify against the hashes and checks in the playbook.
 
 ## Domains
@@ -119,7 +119,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md). The short version:
 1. Pick a domain under `domains/`.
 2. Create `domains/<domain>/<project>/`.
 3. Add `README.md` and `playbook.md`.
-4. Add patcher source only if it is safe to publish; never commit a compiled patcher or a pre-patched binary.
+4. Add optional source only if it is safe to publish; never commit a compiled patcher, a keygen, or a pre-patched binary.
 5. Keep the root README generic.
 
 ## License
