@@ -14,6 +14,8 @@ Read these when you reach the matching step:
 - `scripts/new-project.ps1` to scaffold a project.
 - `scripts/check-repo.ps1` before commit.
 
+Resolve `references/` and `scripts/` relative to this `SKILL.md`. In the Jailbreak repository, the same files are under `skills/add-crack/`.
+
 Run commands from the repository root.
 
 ## 1. Preconditions
