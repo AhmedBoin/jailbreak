@@ -47,7 +47,7 @@ The fully patched build in this playbook has:
 
 ```text
 size            6,517,616 bytes
-SHA256          6654F884016BD22DCAE44C95ABB835E493CCCB45DB871BDD4AD419BC1D932477
+SHA256          BACF3DCC44073935FD72493A2578F0A7295FE2F447A9DCF68EC0C4CD3774A020
 ```
 
 ## 3. License model
@@ -309,7 +309,7 @@ Re-read every site after writing:
 The SHA256 of the patched file must be:
 
 ```text
-6654F884016BD22DCAE44C95ABB835E493CCCB45DB871BDD4AD419BC1D932477
+BACF3DCC44073935FD72493A2578F0A7295FE2F447A9DCF68EC0C4CD3774A020
 ```
 
 Any other hash means the patch set, order, or target build is wrong.
@@ -339,3 +339,59 @@ Commit only this playbook, the project README, and local build notes. If a patch
 - `LastCheckQU` is a timestamp, not a boolean. Do not set it to a far-future value as the only update fix; patch the check function instead.
 - IDM replaces `IDMan.exe` on update. Re-run the discovery workflow after every update.
 - The registry values are per-user. A new Windows profile needs the four values again.
+
+## 11. Tray and exit overlay
+
+The base ten patches stop the buy page, the fake-serial warnings, and the update check. They do not stop the timer that closes the application after it hides to the tray, and they do not stop the timer that launches the second purchase URL. Apply this overlay after the base set.
+
+| Site | File offset | Original bytes | Patch bytes | Purpose |
+|---|---:|---|---|---|
+| 11 | `0x000914DD` | `FF 15 44 E5 7C 00` | `E8 A5 13 03 00 90` | Replace the timer `ShellExecuteA` call with a `ret 0x18` gadget |
+| 12 | `0x00088C15` | `8B 75 08 8B C6` | `E9 DA 0A 00 00` | Redirect `WM_CLOSE` to the hide-to-tray cave |
+| 13 | `0x000896F4` | `CC` x 34 | cave code | Hide the window and return 0 on `WM_CLOSE` |
+| 14 | `0x0008DA76` | `68 10 27 00 00` | `68 FF FF FF 7F` | Disable the 10 second exit timer |
+| 15 | `0x0006C073` | `8D 8E 20 4E 00 00 51` | `68 FF FF FF 7F 90 90` | Disable the 32 second exit timer |
+| 16 | `0x0006C08C` | `75 41` | `90 90` | Remove the timer exit branch |
+| 17 | `0x0006C09A` | `E8 B1 72 FB FF` | `83 C4 0C 90 90` | Skip the 12 second registration timer |
+| 18 | `0x000101D4` | `FF 15 04 85 6D 00` | `E8 06 05 FF FF 90` | Neutralize the first stray `ExitProcess` call |
+| 19 | `0x0004D006` | `FF 15 04 85 6D 00` | `E8 D4 36 FB FF 90` | Neutralize the second stray `ExitProcess` call |
+| 20 | `0x0006640B` | `FF 15 04 85 6D 00` | `E8 CF A2 F9 FF 90` | Neutralize the third stray `ExitProcess` call |
+| 21 | `0x0006C0CF` | `FF 15 04 85 6D 00` | `E8 0B 46 F9 FF 90` | Neutralize the fourth stray `ExitProcess` call |
+| 22 | `0x00120D5C` | `FF 15 04 85 6D 00` | `E8 7E F9 ED FF 90` | Neutralize the fifth stray `ExitProcess` call |
+
+The cave at `0x48A2F4` (`0x000896F4`) is:
+
+```text
+8B 75 08             mov esi, [ebp+8]
+83 FE 10             cmp esi, 0x10
+74 0A                je close
+8B C6                mov eax, esi
+83 E8 01             sub eax, 1
+E9 17 F5 FF FF       jmp 0x48981D
+6A 00                push 0
+FF 77 20             push dword [edi+0x20]
+FF 15 DC 87 6D 00    call dword [0x6D87DC]
+E9 34 F5 FF FF       jmp 0x48984A
+```
+
+`ShowWindow` is imported at `0x006D87DC`. The cave returns through the normal function epilogue at `0x0048984A`, so the SEH frame and stack stay balanced.
+
+### 11.1 Why the overlay is required
+
+The first buy-page block is at `0x004920AA` in the timer handler. It builds the URL and calls `ShellExecuteA` at `0x004920DD`. Replacing that call with a call to a `ret 0x18` gadget removes the browser launch without leaving six arguments on the stack.
+
+The `WM_CLOSE` message is not handled by the main window procedure. It falls through to `DefWindowProc`, which destroys the window and ends the message loop. Patch 12 intercepts `WM_CLOSE` before the message switch and sends it to the cave. The cave hides the window and returns 0, so the window remains alive in the tray.
+
+The application still exits later because the registration timer calls `ExitProcess` at `0x0046CCCF`. Timer 4 fires after 10 seconds, timer 1 after about 32 seconds, and timer 111 after about 12 seconds. The timer overlay disables all three and neutralizes the five application `ExitProcess` calls, so a stray timer cannot terminate the process.
+
+### 11.2 Verification
+
+- Start `IDMan.exe`. Wait 45 seconds. The process must remain alive.
+- Send `WM_CLOSE` to the main window. The window must become hidden, and the process must remain alive for at least 20 seconds.
+- Confirm that the tray icon is present in the notification area.
+- Confirm that no `buy2.html` or `buy_idm2.html` browser process appears.
+- Confirm that the patched SHA256 is:
+
+```text
+BACF3DCC44073935FD72493A2578F0A7295FE2F447A9DCF68EC0C4CD3774A020
+```
