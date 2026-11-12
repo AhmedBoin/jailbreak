@@ -37,6 +37,9 @@ jailbreak/
     logo.svg
   docs/
     install-uncensored.md
+    install-skill.md
+  skills/
+    add-crack/
   domains/
     <domain>/
       <project>/
@@ -88,6 +91,15 @@ Install it in the harness you use:
 | Aider | `CONVENTIONS.md` | repo root, load with `--read` |
 
 Full copy-paste steps for each harness: [`docs/install-uncensored.md`](docs/install-uncensored.md).
+
+## Automation
+
+The `add-crack` skill turns the contribution workflow into a repeatable operation:
+
+- Skill: [`skills/add-crack/SKILL.md`](skills/add-crack/SKILL.md)
+- Scaffold: `powershell -ExecutionPolicy Bypass -File skills/add-crack/scripts/new-project.ps1 -Domain <domain> -Project <project> -Title "<title>"`
+- Check before commit: `powershell -ExecutionPolicy Bypass -File skills/add-crack/scripts/check-repo.ps1`
+- Install for other harnesses: [`docs/install-skill.md`](docs/install-skill.md)
 
 ## Add a project
 

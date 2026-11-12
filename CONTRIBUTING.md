@@ -2,6 +2,28 @@
 
 Jailbreak is a domain-organized library. Add a project as a self-contained folder under `domains/`, not as a new section in the root README.
 
+## Automation
+
+Use the add-crack skill and its scripts:
+
+```text
+skills/add-crack/SKILL.md
+skills/add-crack/scripts/new-project.ps1
+skills/add-crack/scripts/check-repo.ps1
+```
+
+Scaffold a project:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File skills/add-crack/scripts/new-project.ps1 -Domain <domain> -Project <project> -Title "<title>"
+```
+
+Run the repository checks before commit:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File skills/add-crack/scripts/check-repo.ps1
+```
+
 ## Folder layout
 
 ```text
