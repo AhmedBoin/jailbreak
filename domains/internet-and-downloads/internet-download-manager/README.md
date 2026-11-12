@@ -38,7 +38,9 @@ All offsets are file offsets for the 6.43 build 18 `IDMan.exe`.
 | `0x93B5F` | `E8 FC FF FD FF` | `31 C0 90 90 90` | Skip the first fake-serial warning |
 | `0x74E84` | `E8 D7 EC FF FF` | `31 C0 90 90 90` | Skip the second fake-serial warning |
 | `0x55DD0` | `55 8B EC` | `33 C0 C3` | Disable the automatic update check |
-| `0x7C1A0` | `55` | `C3` | Disable the buy-page URL builder |
+| `0x7C1A0` | `55` | `C3` | Disable the first buy-page URL builder |
+| `0x7EA43` | `E8 B8 7C 03 00` | `31 C0 90 90 90` | Skip the timer buy-page opener |
+| `0x863E9` | `0F 84 78 01 00 00` | `E9 79 01 00 00 90` | Force the timer's registered path to stop the exit |
 
 ## Registry
 
@@ -58,14 +60,14 @@ The serial must be 23 characters with hyphens at positions 5, 11, and 17, for ex
 ```text
 size            6,517,616 bytes
 pristine SHA256 A705C0154FAFC7CD509DECF165CB6F6C050B6521B40ADB6F730DD827C86051C7
-patched SHA256  88C07404C62450D7CE340BBEC48CF71C195F6560BB1DBF0BB44BD06482D48AA9
+patched SHA256  6654F884016BD22DCAE44C95ABB835E493CCCB45DB871BDD4AD419BC1D932477
 ```
 
-The patched hash is for the exact eight-patch set above. A different patch order or a new build produces a different hash.
+The patched hash is for the exact ten-patch set above. A different patch order or a new build produces a different hash.
 
 ## Updates
 
-An IDM update replaces `IDMan.exe` and restores the original bytes. Re-run the discovery workflow in the playbook, update the offsets, and re-apply the eight patches.
+An IDM update replaces `IDMan.exe` and restores the original bytes. Re-run the discovery workflow in the playbook, update the offsets, and re-apply the ten patches.
 
 The update check is disabled by the `0x55DD0` patch. Manual `Help -> Check for updates` remains a separate action.
 

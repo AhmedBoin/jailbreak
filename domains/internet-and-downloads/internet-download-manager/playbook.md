@@ -47,7 +47,7 @@ The fully patched build in this playbook has:
 
 ```text
 size            6,517,616 bytes
-SHA256          88C07404C62450D7CE340BBEC48CF71C195F6560BB1DBF0BB44BD06482D48AA9
+SHA256          6654F884016BD22DCAE44C95ABB835E493CCCB45DB871BDD4AD419BC1D932477
 ```
 
 ## 3. License model
@@ -117,7 +117,9 @@ file offset = virtual address - 0x00401000 + 0x00000400
 | 5 | `0x0049475F` | `0x00093B5F` | `E8 FC FF FD FF` | `31 C0 90 90 90` | Skip fake-serial warning 1 |
 | 6 | `0x00475A84` | `0x00074E84` | `E8 D7 EC FF FF` | `31 C0 90 90 90` | Skip fake-serial warning 2 |
 | 7 | `0x004569D0` | `0x00055DD0` | `55 8B EC` | `33 C0 C3` | Auto-update check returns 0 |
-| 8 | `0x0047CDA0` | `0x0007C1A0` | `55` | `C3` | Buy-page builder returns immediately |
+| 8 | `0x0047CDA0` | `0x0007C1A0` | `55` | `C3` | First buy-page builder returns immediately |
+| 9 | `0x0047F643` | `0x0007EA43` | `E8 B8 7C 03 00` | `31 C0 90 90 90` | Skip the timer buy-page opener |
+| 10 | `0x00486FE9` | `0x000863E9` | `0F 84 78 01 00 00` | `E9 79 01 00 00 90` | Force the timer's registered path |
 
 ### Site 1: online branch
 
@@ -165,9 +167,38 @@ C3      ret
 
 makes the caller treat the check as not due. `LastCheckQU` stays unchanged after startup.
 
-### Site 8: buy page
+### Site 8: first buy page
 
-`0x0047CDA0` builds the purchase URL from `https://secure%s/` and `%sbuy_idm.html?%s`, then opens it. It is called from `0x0053274F`. Replacing the first byte with `C3` returns immediately. The caller cleans the stack with `add esp, 0x14`, so the stack stays balanced. This removes the automatic buy page and makes the in-app buy buttons inert.
+`0x0047CDA0` builds the purchase URL from `https://secure%s/` and `%sbuy_idm.html?%s`, then opens it. It is called from `0x0053274F`. Replacing the first byte with `C3` returns immediately. The caller cleans the stack with `add esp, 0x14`, so the stack stays balanced. This removes the first automatic buy page and makes the in-app buy buttons inert.
+
+### Site 9: timer buy-page opener
+
+`0x0047F643` is a call to the URL opener at `0x004B7300` inside the timer path. The surrounding function builds `http://www.internetdownloadmanager.com/buy2.html` and opens it through Chrome. The caller pushes two arguments and cleans them with `add esp, 8` after the call. Replacing the five-byte call with:
+
+```text
+31 C0         xor eax, eax
+90 90 90      nop
+```
+
+skips the URL open and keeps the stack balanced. The browser page and its redirect to `buy_idm2.html` no longer appear.
+
+### Site 10: timer exit path
+
+`0x00486FE9` is the conditional jump after the unregistered check in the timer handler:
+
+```text
+0x00486FE3   cmp dword [0x007C4D24], 0
+0x00486FE9   0F 84 78 01 00 00   je 0x00487167
+```
+
+When the unregistered flag is 1, the timer writes `vCOUFP`, runs the trial path, and closes the application. Replacing the conditional jump with an unconditional jump:
+
+```text
+E9 79 01 00 00   jmp 0x00487167
+90               nop
+```
+
+forces the registered path. IDM stays open after the timer fires. This is the patch that stops the complete application exit, not just the browser page.
 
 ## 5. Registry setup
 
@@ -255,6 +286,7 @@ Search for `LastCheckQU` and `IDMGrHlp.exe`. The check function in 6.43 build 18
 - Add a download. No counterfeit dialog and no fake-serial warning may appear.
 - Confirm that no `buy_idm2.html` page opens in the browser.
 - Read `LastCheckQU` before and after startup. It must not change.
+- Wait at least 90 seconds. IDM must remain running and no `buy2.html` or `buy_idm2.html` browser process may appear.
 - Let a small download complete and compare its size with the server.
 
 ### Patch verification
@@ -270,12 +302,14 @@ Re-read every site after writing:
 0x74E84  31 C0 90 90 90
 0x55DD0  33 C0 C3
 0x7C1A0  C3
+0x7EA43  31 C0 90 90 90
+0x863E9  E9 79 01 00 00 90
 ```
 
 The SHA256 of the patched file must be:
 
 ```text
-88C07404C62450D7CE340BBEC48CF71C195F6560BB1DBF0BB44BD06482D48AA9
+6654F884016BD22DCAE44C95ABB835E493CCCB45DB871BDD4AD419BC1D932477
 ```
 
 Any other hash means the patch set, order, or target build is wrong.
@@ -300,6 +334,8 @@ Commit only this playbook, the project README, and local build notes. If a patch
 - The serial format check is not a license check. Any syntactically valid synthetic serial passes the local format stage.
 - The online branch and the counterfeit status are separate. Patching only one of them leaves either the exit dialog or the warning path active.
 - The two warning call sites are independent. Patching only one leaves the other message visible.
+- The first buy-page builder at `0x0047CDA0` and the timer buy-page opener at `0x0047F643` are separate. Patching only the builder leaves the startup buy page and the timer exit active.
+- The timer exit is controlled by the unregistered check at `0x00486FE9`. The buy-page opener alone does not stop the application close.
 - `LastCheckQU` is a timestamp, not a boolean. Do not set it to a far-future value as the only update fix; patch the check function instead.
 - IDM replaces `IDMan.exe` on update. Re-run the discovery workflow after every update.
 - The registry values are per-user. A new Windows profile needs the four values again.
