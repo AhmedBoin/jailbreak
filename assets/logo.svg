@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 480" width="1600" height="480" role="img" aria-labelledby="logoTitle logoDesc">
+  <title id="logoTitle">Jailbreak</title>
+  <desc id="logoDesc">A broken padlock and neon wordmark for the Jailbreak software research repository.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#04070c"/>
+      <stop offset="0.55" stop-color="#08111d"/>
+      <stop offset="1" stop-color="#0d1b2b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#00ff9d"/>
+      <stop offset="0.48" stop-color="#00e5c3"/>
+      <stop offset="1" stop-color="#00c8ff"/>
+    </linearGradient>
+    <linearGradient id="accentSoft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#00ff9d" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#00c8ff" stop-opacity="0.35"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#00ff9d" stop-opacity="0.32"/>
+      <stop offset="0.55" stop-color="#00c8ff" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#00c8ff" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#7dd3fc" stroke-opacity="0.055" stroke-width="1"/>
+    </pattern>
+    <pattern id="micro" width="8" height="8" patternUnits="userSpaceOnUse">
+      <path d="M 8 0 L 0 0 0 8" fill="none" stroke="#00ff9d" stroke-opacity="0.025" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1600" height="480" fill="url(#bg)"/>
+  <rect width="1600" height="480" fill="url(#grid)"/>
+  <rect width="1600" height="480" fill="url(#micro)"/>
+  <circle cx="1270" cy="60" r="300" fill="url(#glow)"/>
+  <circle cx="1380" cy="430" r="240" fill="url(#glow)" opacity="0.45"/>
+
+  <g opacity="0.55">
+    <path d="M 0 96 L 88 96 L 118 126 L 206 126" fill="none" stroke="#00ff9d" stroke-opacity="0.16" stroke-width="1"/>
+    <path d="M 0 404 L 58 404 L 86 376 L 154 376" fill="none" stroke="#00c8ff" stroke-opacity="0.14" stroke-width="1"/>
+    <path d="M 1470 62 L 1548 62 L 1572 86 L 1600 86" fill="none" stroke="#00c8ff" stroke-opacity="0.12" stroke-width="1"/>
+    <circle cx="88" cy="96" r="3" fill="#00ff9d" fill-opacity="0.5"/>
+    <circle cx="1548" cy="62" r="3" fill="#00c8ff" fill-opacity="0.5"/>
+  </g>
+
+  <g>
+    <path d="M 118 232 L 118 184 A 72 72 0 0 1 190 112" fill="none" stroke="url(#accent)" stroke-width="18" stroke-linecap="round"/>
+    <path d="M 212 112 A 72 72 0 0 1 262 184 L 262 232" fill="none" stroke="url(#accent)" stroke-width="18" stroke-linecap="round"/>
+    <rect x="78" y="228" width="224" height="164" rx="26" fill="#08131f" stroke="url(#accent)" stroke-width="10"/>
+    <rect x="94" y="244" width="192" height="132" rx="18" fill="none" stroke="#00ff9d" stroke-opacity="0.18" stroke-width="2"/>
+    <circle cx="190" cy="286" r="21" fill="url(#accent)"/>
+    <path d="M 181 302 L 199 302 L 206 350 L 174 350 Z" fill="url(#accent)"/>
+    <path d="M 190 302 L 190 332" stroke="#041018" stroke-width="6" stroke-linecap="round"/>
+    <path d="M 302 272 L 356 272 L 380 296" fill="none" stroke="#00ff9d" stroke-opacity="0.35" stroke-width="2"/>
+    <path d="M 302 316 L 340 316 L 366 342" fill="none" stroke="#00c8ff" stroke-opacity="0.30" stroke-width="2"/>
+    <circle cx="380" cy="296" r="4" fill="#00ff9d" fill-opacity="0.7"/>
+    <circle cx="366" cy="342" r="4" fill="#00c8ff" fill-opacity="0.7"/>
+  </g>
+
+  <g>
+    <text x="474" y="274" font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="150" font-weight="900" letter-spacing="3" fill="#ff3ea5" opacity="0.30" transform="translate(5 5)">JAILBREAK</text>
+    <text x="474" y="274" font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="150" font-weight="900" letter-spacing="3" fill="#00d9ff" opacity="0.30" transform="translate(-5 -4)">JAILBREAK</text>
+    <text x="474" y="274" font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="150" font-weight="900" letter-spacing="3" fill="url(#accent)">JAILBREAK</text>
+    <text x="478" y="334" font-family="Consolas, Lucida Console, monospace" font-size="23" letter-spacing="7" fill="#9fb3c8">UNRESTRICTED SOFTWARE RESEARCH</text>
+    <text x="478" y="386" font-family="Consolas, Lucida Console, monospace" font-size="15" letter-spacing="4" fill="#50708c">DOMAINS / PLAYBOOKS / PATCHERS</text>
+  </g>
+
+  <rect x="78" y="424" width="1444" height="2" fill="url(#accent)" opacity="0.55"/>
+  <text x="1522" y="456" text-anchor="end" font-family="Consolas, Lucida Console, monospace" font-size="13" letter-spacing="3" fill="#3d5a73">OPEN PLAYBOOKS</text>
+  <text x="78" y="456" font-family="Consolas, Lucida Console, monospace" font-size="13" letter-spacing="3" fill="#3d5a73">JAILBREAK.REPO</text>
+</svg>
