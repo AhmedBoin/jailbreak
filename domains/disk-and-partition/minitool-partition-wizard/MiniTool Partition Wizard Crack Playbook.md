@@ -558,7 +558,7 @@ Fast self-test for 13.9:
 Keep a pristine DLL outside the install directory:
 
 ```
-%ProgramData%\MTPWPatcher\backup\partitionwizard.dll.orig
+<backup-dir>\partitionwizard.dll.orig
 ```
 
 13.9 pristine SHA256:
@@ -686,9 +686,9 @@ If the target functions are thunks, patch the thunk target instead. If the thunk
 
 ---
 
-## 14. Companion 13.9 patcher
+## 14. Companion 13.9 procedure
 
-A standalone 13.9-only patcher can be built from the algorithm in this playbook. It checks the 13.9 size and bytes and refuses unknown builds. For a new version, use the discovery workflow above and patch the new RVAs, then rebuild the patcher or use the generic script.
+This repository does not ship a standalone patcher. Use the four offsets above with a local hex editor or a local script. Any local tooling should check the 13.9 size and bytes and refuse unknown builds. For a new version, use the discovery workflow above and patch the new RVAs.
 
 ---
 
