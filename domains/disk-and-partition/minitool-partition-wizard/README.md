@@ -11,17 +11,19 @@ Status: desktop and WinPE verified.
 | File | Purpose |
 |---|---|
 | `MiniTool Partition Wizard Crack Playbook.md` | Full analysis, offsets, discovery workflow, WinPE details, ISO rebuild |
-| `patcher/MTPWPatcher.exe` | Standalone 13.9 patcher, no Python or SDK needed |
 | `patcher/src/` | C# source, manifest, build script, test harness, patcher README |
 | `legacy/patch_minitool_pw.py` | Original desktop-only Python patcher, kept for reference |
+
+The compiled patcher is not committed. Build it locally from `patcher/src/`; see the repository distribution policy.
 
 ## Quick start
 
 1. Close `partitionwizard.exe`.
-2. Run `patcher/MTPWPatcher.exe` as administrator.
-3. Confirm the DLL path and click `Apply 4 Patches`.
-4. Rebuild the bootable media from the app so `boot.wim` receives the patched DLL.
-5. Verify the desktop title bar and the WinPE boot.
+2. Build the patcher locally from `patcher/src/` with the included `build.cmd`.
+3. Run the resulting patcher as administrator.
+4. Confirm the DLL path and click `Apply 4 Patches`.
+5. Rebuild the bootable media from the app so `boot.wim` receives the patched DLL.
+6. Verify the desktop title bar and the WinPE boot.
 
 The patcher applies four patches:
 

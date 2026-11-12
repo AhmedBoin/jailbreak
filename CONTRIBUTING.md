@@ -33,7 +33,8 @@ domains/
       README.md
       playbook.md
       patcher/
-        <patcher files>
+        src/
+          <source only>
       legacy/
         <optional old scripts>
 ```
@@ -58,6 +59,7 @@ Pick the closest existing domain:
 | `games` | Game clients, engines, mod loaders, single-player tools |
 | `development-tools` | IDEs, compilers, debuggers, SDKs |
 | `security-and-networking` | Network tools, packet analysis, local security research |
+| `internet-and-downloads` | Download managers, sync clients, internet utilities |
 | `productivity` | Office, PDF, workflow, automation |
 | `other` | Anything that does not fit yet |
 
@@ -95,16 +97,16 @@ Prefer concrete data over narrative. Include commands and small scripts.
 
 ## Tooling
 
-If you ship a patcher or crack:
+If you publish a patcher source:
 
-- Put it in `patcher/`
-- Include source code and build instructions
+- Put the source in `patcher/src/`
+- Include build instructions
 - State the exact target build and hash
 - Refuse unknown builds instead of patching blindly
 - Verify after writing
 - Keep a rollback path
 
-Do not commit commercial binaries, installers, or copyrighted application files. Ship patches, scripts, source, and documentation.
+Do not commit a compiled patcher, a keygen, a license generator, a pre-patched binary, a commercial binary, an installer, or a copyrighted application file. Ship patches, source, and documentation. For vendors that actively enforce their licenses, publish the guide only and keep all tooling local.
 
 ## Root README
 

@@ -1,0 +1,82 @@
+# Internet Download Manager
+
+Domain: `internet-and-downloads`
+
+Target: Internet Download Manager 6.43 build 18, 32-bit native build.
+
+Status: registered state, warning suppression, buy-page suppression, and update-check suppression verified locally.
+
+This project is a guide only. It ships no patched binary, no keygen, and no compiled patcher. Build the patched file locally from the playbook if you need it.
+
+## What is included
+
+| File | Purpose |
+|---|---|
+| `playbook.md` | Full analysis, offsets, registry setup, discovery workflow, verification, rollback |
+| `README.md` | Scope, patch summary, and quick start |
+
+## Quick start
+
+1. Close `IDMan.exe`.
+2. Back up `IDMan.exe` outside the install directory.
+3. Apply the eight byte patches in the playbook.
+4. Create the four registry values under `HKCU\Software\DownloadManager`.
+5. Start IDM and confirm `idmvers` changes from `v6.43b18 Trial` to `v6.43b18 Full`.
+6. Add a download and confirm that no counterfeit dialog and no fake-serial warning appear.
+7. Confirm that no buy page opens and that `LastCheckQU` does not change.
+
+## Patch summary
+
+All offsets are file offsets for the 6.43 build 18 `IDMan.exe`.
+
+| Offset | Original | Patch | Purpose |
+|---:|---|---|---|
+| `0x4FFC4` | `74 15` | `EB 15` | Force the online registration branch to success |
+| `0x5A4B0` | `55 8B EC` | `B0 01 C3` | Registration name validator returns true |
+| `0x5A830` | `55 8B EC` | `B0 01 C3` | Serial validator returns true |
+| `0x50C1C` | `B8 03 00 00 00` | `B8 00 00 00 00` | Counterfeit status becomes registered status |
+| `0x93B5F` | `E8 FC FF FD FF` | `31 C0 90 90 90` | Skip the first fake-serial warning |
+| `0x74E84` | `E8 D7 EC FF FF` | `31 C0 90 90 90` | Skip the second fake-serial warning |
+| `0x55DD0` | `55 8B EC` | `33 C0 C3` | Disable the automatic update check |
+| `0x7C1A0` | `55` | `C3` | Disable the buy-page URL builder |
+
+## Registry
+
+Create these values under `HKCU\Software\DownloadManager`:
+
+```text
+Serial  REG_SZ  12345-67890-12345-67890
+FName   REG_SZ  Test
+LName   REG_SZ  User
+Email   REG_SZ  test@example.com
+```
+
+The serial must be 23 characters with hyphens at positions 5, 11, and 17, for example `XXXXX-XXXXX-XXXXX-XXXXX`. Use a synthetic value, not a leaked key.
+
+## Reference build
+
+```text
+size            6,517,616 bytes
+pristine SHA256 A705C0154FAFC7CD509DECF165CB6F6C050B6521B40ADB6F730DD827C86051C7
+patched SHA256  88C07404C62450D7CE340BBEC48CF71C195F6560BB1DBF0BB44BD06482D48AA9
+```
+
+The patched hash is for the exact eight-patch set above. A different patch order or a new build produces a different hash.
+
+## Updates
+
+An IDM update replaces `IDMan.exe` and restores the original bytes. Re-run the discovery workflow in the playbook, update the offsets, and re-apply the eight patches.
+
+The update check is disabled by the `0x55DD0` patch. Manual `Help -> Check for updates` remains a separate action.
+
+## Distribution policy
+
+This repository publishes analysis and guides, not ready-to-run cracks. Do not commit a patched `IDMan.exe`, a keygen, a license generator, or a compiled patcher for this project. The playbook contains the offsets and the local procedure.
+
+## Full playbook
+
+Open [`playbook.md`](playbook.md).
+
+## License
+
+MIT. See the repository [`LICENSE`](../../../LICENSE).

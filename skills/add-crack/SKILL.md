@@ -5,7 +5,7 @@ description: Add a new crack or patch project to the Jailbreak repository. Use w
 
 # Add Crack
 
-Use this skill to add one complete project to the Jailbreak repository: a domain folder, a project README, a reverse engineering playbook, optional patcher source and binaries, verification notes, and a clean commit.
+Use this skill to add one complete project to the Jailbreak repository: a domain folder, a project README, a reverse engineering playbook, optional patcher source, verification notes, and a clean commit.
 
 Read these when you reach the matching step:
 
@@ -17,6 +17,16 @@ Read these when you reach the matching step:
 Resolve `references/` and `scripts/` relative to this `SKILL.md`. In the Jailbreak repository, the same files are under `skills/add-crack/`.
 
 Run commands from the repository root.
+
+## 0. Distribution policy
+
+This repository publishes analysis and guides, not ready-to-run cracks.
+
+- Never commit a pre-patched commercial binary, a keygen, a license generator, or a compiled patcher.
+- Commit the playbook, the project README, and optional source that a user builds locally.
+- For vendors that actively enforce their licenses, publish the guide only and keep all tooling local.
+- A playbook may contain offsets, byte patterns, and verification steps. It must not contain a commercial installer, a patched build, or a license key.
+- The repository check script rejects compiled patchers and pre-patched binaries. Do not add an exception.
 
 ## 1. Preconditions
 
@@ -136,7 +146,7 @@ The playbook must include:
 
 Another engineer must be able to recreate the patch from the playbook without asking questions.
 
-## 6. Build the patcher
+## 6. Build the patcher locally
 
 Read `references/patcher-checklist.md`.
 
@@ -144,7 +154,6 @@ Preferred shape:
 
 ```text
 patcher/
-  ToolPatcher.exe
   README-Patcher.txt
   src/
     PatcherCore.cs
@@ -152,6 +161,8 @@ patcher/
     app.manifest
     build.cmd
 ```
+
+The compiled executable is a local artifact. It is not committed to the repository.
 
 Requirements:
 
@@ -163,7 +174,7 @@ Requirements:
 - Refuses to write while the target process is running.
 - Verifies every patch after writing.
 - Uses an atomic replace or a safe temp-file swap.
-- Includes source and a one-command build script.
+- Includes source and a one-command build script; the compiled binary stays outside the repository.
 - No telemetry, no network calls, no external runtime installer.
 
 For a Windows-only patcher, compile C# with the .NET Framework compiler that ships with Windows:
@@ -248,15 +259,15 @@ git log -1 --format="%H%n%an <%ae>%n%s"
 git ls-tree -r --name-only HEAD
 ```
 
-The remote tree must contain the project README, playbook, patcher source, and any shipped binary. It must not contain personal paths or commercial application files.
+The remote tree must contain the project README, the playbook, and patcher source only when it is published. It must not contain a compiled patcher, a pre-patched binary, a keygen, personal paths, or commercial application files.
 
 ## 10. Definition of done
 
 - Project is under `domains/<domain>/<project>/`.
 - `README.md` explains the target, status, files, quick start, and update behavior.
 - `playbook.md` has exact offsets, bytes, discovery steps, verification, and rollback.
-- Patcher source and binary are present if a patcher is shipped.
-- Patcher is build-locked and refuses unknown builds.
+- Patcher source is present only when it is published; no compiled patcher or pre-patched binary is committed.
+- Patcher is build-locked and refuses unknown builds when source is published.
 - Desktop and secondary environment are both verified when applicable.
 - No personal paths or identifying data.
 - Root README remains generic and has no project list.
@@ -272,4 +283,5 @@ The remote tree must contain the project README, playbook, patcher source, and a
 - Leaving the pristine backup inside the install directory and then embedding it in boot media.
 - Adding a project list to the root README.
 - Committing installers, DLLs, or other commercial binaries.
+- Committing a compiled patcher, a keygen, a license generator, or a pre-patched binary.
 - Leaving a local user path in the playbook or source.

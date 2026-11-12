@@ -34,7 +34,8 @@ Use this checklist for every standalone patcher added to the repository.
 - [ ] Source is included under `patcher/src/`.
 - [ ] A one-command build script is included.
 - [ ] The build script uses only tools that ship with Windows or are documented.
-- [ ] The binary is small and has no external runtime installer.
+- [ ] The local build is small and has no external runtime installer.
+- [ ] No compiled patcher is committed. The binary is a local build artifact.
 - [ ] No telemetry, analytics, or network calls.
 - [ ] A short `README-Patcher.txt` explains run, check, apply, restore, and build.
 
@@ -53,5 +54,6 @@ Use this checklist for every standalone patcher added to the repository.
 
 - [ ] No personal paths in source, docs, or binary strings.
 - [ ] No commercial application binaries are committed.
+- [ ] No compiled patcher, keygen, license generator, or pre-patched binary is committed.
 - [ ] The project README links to the playbook.
 - [ ] The root README is unchanged except for a generic domain or automation link.

@@ -25,6 +25,16 @@ Jailbreak is a structure, not a list. Every project lives in its own folder unde
 
 The root README stays generic. Projects are discovered by browsing `domains/`, not by reading a fixed list here.
 
+## Distribution policy
+
+This repository publishes analysis and guides, not ready-to-run cracks.
+
+- Do not commit pre-patched commercial binaries, keygens, license generators, or compiled patchers.
+- Commit the playbook, project README, and optional source that a user builds locally.
+- For vendors that actively enforce their licenses, publish the guide only and keep all tooling local.
+- A playbook may contain offsets, byte patterns, and verification steps. It must not contain a commercial installer, a patched build, or a license key.
+- Distributing a circumvention binary or keygen can trigger a DMCA notice, repository removal, and account penalties. Private repositories are not immune to a valid notice.
+
 ## Repository map
 
 ```text
@@ -45,7 +55,7 @@ jailbreak/
       <project>/
         README.md
         playbook.md
-        patcher/
+        patcher/ (source only, built locally)
         legacy/
 ```
 
@@ -54,7 +64,7 @@ jailbreak/
 1. Open `domains/` and choose a domain.
 2. Open the project folder and read its `README.md`.
 3. Follow the playbook to recreate the patch.
-4. Use the `patcher/` tooling if the project ships one.
+4. Build any patcher locally from the source; compiled patchers are not shipped.
 5. Verify against the hashes and checks in the playbook.
 
 ## Domains
@@ -69,6 +79,7 @@ Domains group projects by software category. Create a new domain when a project 
 | `games` | Game clients, engines, mod loaders, single-player tools |
 | `development-tools` | IDEs, compilers, debuggers, SDKs |
 | `security-and-networking` | Network tools, packet analysis, local security research |
+| `internet-and-downloads` | Download managers, sync clients, internet utilities |
 | `productivity` | Office, PDF, workflow, automation |
 | `other` | Anything that does not fit yet |
 
@@ -108,7 +119,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md). The short version:
 1. Pick a domain under `domains/`.
 2. Create `domains/<domain>/<project>/`.
 3. Add `README.md` and `playbook.md`.
-4. Add `patcher/` only if you ship tooling.
+4. Add patcher source only if it is safe to publish; never commit a compiled patcher or a pre-patched binary.
 5. Keep the root README generic.
 
 ## License

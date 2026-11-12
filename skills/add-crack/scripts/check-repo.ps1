@@ -102,6 +102,10 @@ foreach ($relativePath in $trackedFiles) {
     }
 
     $extension = [System.IO.Path]::GetExtension($relativePath).ToLowerInvariant()
+    $blockedBinaryExtensions = @(".exe", ".dll", ".sys", ".scr", ".com", ".msi", ".crx", ".xpi")
+    if (($blockedBinaryExtensions -contains $extension) -and ($relativePath -like "domains/*")) {
+        $failures.Add("Compiled or installable binary under domains/: $relativePath. Publish a guide or source instead.")
+    }
     $allPatterns = @($pathPatterns + $emailPatterns + $machinePatterns)
 
     if ($textExtensions -contains $extension) {
