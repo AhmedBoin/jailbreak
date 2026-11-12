@@ -16,12 +16,10 @@
 
 ## What this repository is
 
-Jailbreak is a structure, not a list. Every project lives in its own folder under a domain, with a repeatable playbook and, when useful, source that a user builds locally.
+Jailbreak is a structure, not a list. Every project lives in its own folder under a domain, with a repeatable playbook.
 
 - `playbook.md`: how to analyze the target and recreate the patch
 - `README.md`: project scope, status, and quick start
-- `patcher/src/` or `src/`: optional source, built locally when a project publishes it
-- `legacy/`: optional source only, no binaries
 
 The root README stays generic. Projects are discovered by browsing `domains/`, not by reading a fixed list here.
 
@@ -30,7 +28,7 @@ The root README stays generic. Projects are discovered by browsing `domains/`, n
 This repository publishes analysis and guides, not ready-to-run cracks.
 
 - Do not commit pre-patched commercial binaries, keygens, license generators, or compiled patchers.
-- Commit the playbook, project README, and optional source that a user builds locally.
+- Commit the playbook and the project README. Do not commit compiled or pre-patched artifacts.
 - For vendors that actively enforce their licenses, publish the guide only and keep all tooling local.
 - A playbook may contain offsets, byte patterns, and verification steps. It must not contain a commercial installer, a patched build, or a license key.
 - Distributing a circumvention binary or keygen can trigger a DMCA notice, repository removal, and account penalties. Private repositories are not immune to a valid notice.
@@ -55,8 +53,6 @@ jailbreak/
       <project>/
         README.md
         playbook.md
-        patcher/src/ (optional source only)
-        legacy/ (optional source only)
 ```
 
 ## Use a project
@@ -64,8 +60,7 @@ jailbreak/
 1. Open `domains/` and choose a domain.
 2. Open the project folder and read its `README.md`.
 3. Follow the playbook to recreate the patch.
-4. If the project includes source, build it locally; compiled patchers and pre-patched binaries are not shipped.
-5. Verify against the hashes and checks in the playbook.
+4. Verify against the hashes and checks in the playbook.
 
 ## Domains
 
@@ -119,7 +114,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md). The short version:
 1. Pick a domain under `domains/`.
 2. Create `domains/<domain>/<project>/`.
 3. Add `README.md` and `playbook.md`.
-4. Add optional source only if it is safe to publish; never commit a compiled patcher, a keygen, or a pre-patched binary.
+4. Never commit a compiled patcher, a keygen, a license generator, or a pre-patched binary.
 5. Keep the root README generic.
 
 ## License
