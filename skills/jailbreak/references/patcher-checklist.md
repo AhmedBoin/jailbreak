@@ -12,7 +12,7 @@ Use this checklist for every standalone patcher added to the repository.
 
 ## Safety
 
-- [ ] The patcher requires administrator rights through the manifest.
+- [ ] The patcher requests elevated rights when the platform requires them.
 - [ ] It refuses to write while the target process is running.
 - [ ] It creates a pristine backup outside the install directory.
 - [ ] It never writes the backup into the install directory.
@@ -33,7 +33,7 @@ Use this checklist for every standalone patcher added to the repository.
 
 - [ ] Source is included under `patcher/src/`.
 - [ ] A one-command build script is included.
-- [ ] The build script uses only tools that ship with Windows or are documented.
+- [ ] The build script uses documented tools that are available on the target platform.
 - [ ] The local build is small and has no external runtime installer.
 - [ ] No compiled patcher is committed. The binary is a local build artifact.
 - [ ] No telemetry, analytics, or network calls.

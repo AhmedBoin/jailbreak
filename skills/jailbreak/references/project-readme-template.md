@@ -19,7 +19,7 @@ Status: draft
 ## Quick start
 
 1. Close the target application.
-2. Run the patcher from `patcher/` as administrator.
+2. Run the patcher from `patcher/` with the rights the target requires.
 3. Click `Check`, then `Apply`.
 4. Rebuild any boot media or secondary environment with the patched files.
 5. Verify the title bar or About dialog shows the expected edition.

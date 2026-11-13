@@ -25,7 +25,7 @@ file
 size
 sha256
 image base
-sections
+sections, load commands, or program headers
 ```
 
 Record the exact build used for the offsets below. A patcher must refuse any other build.
@@ -49,7 +49,7 @@ Explain the license flow:
 |  | `IsRegistered` |  |  |  | `B0 01 C3` |
 |  | `GetLicenseType` |  |  |  | `B8 08 00 00 00 C3` |
 
-Explain each patch and the edition value used.
+Explain each patch and the edition value used. The example bytes are x86 and x64. For ARM64, record the equivalent return stub for the target architecture.
 
 ## 5. Finding the sites in a new version
 
@@ -86,9 +86,9 @@ Secondary environment:
 - Pristine SHA256:
 - Restore steps:
 
-## 8. Packaging and boot media
+## 8. Packaging and secondary media
 
-- How the product builds boot media, if applicable.
+- How the product builds secondary media, if applicable: WinPE, recovery image, or live image.
 - Where the patched module must be embedded.
 - ISO or image rebuild command.
 - Boot files and catalog details.

@@ -4,24 +4,25 @@ Jailbreak is a domain-organized library. Add a project as a self-contained folde
 
 ## Automation
 
-Use the add-crack skill and its scripts:
+Use the jailbreak skill and its scripts:
 
 ```text
-skills/add-crack/SKILL.md
-skills/add-crack/scripts/new-project.ps1
-skills/add-crack/scripts/check-repo.ps1
+skills/jailbreak/SKILL.md
+skills/jailbreak/scripts/new-project.mjs
+skills/jailbreak/scripts/check-repo.mjs
+skills/jailbreak/scripts/hash.mjs
 ```
 
 Scaffold a project:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File skills/add-crack/scripts/new-project.ps1 -Domain <domain> -Project <project> -Title "<title>"
+```bash
+node skills/jailbreak/scripts/new-project.mjs --domain <domain> --project <project> --title "<title>"
 ```
 
 Run the repository checks before commit:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File skills/add-crack/scripts/check-repo.ps1
+```bash
+node skills/jailbreak/scripts/check-repo.mjs
 ```
 
 ## Folder layout
@@ -42,7 +43,7 @@ domains/
 Use lowercase and hyphens:
 
 ```text
-domains/disk-and-partition/minitool-partition-wizard/
+domains/disk-and-partition/example-tool/
 domains/games/example-game/
 domains/development-tools/example-ide/
 ```
@@ -71,7 +72,7 @@ Every project needs a `README.md` with:
 
 - Project name and domain
 - Supported version or build range
-- Current status: untested, desktop verified, or desktop and PE verified
+- Current status: untested, desktop verified, or desktop and secondary environment verified
 - Files in the folder
 - Quick start
 - Known limitations and update behavior
@@ -91,7 +92,7 @@ A playbook must let another engineer recreate the result without guessing. Inclu
 - Edition values or license state values
 - Verification steps
 - Rollback steps
-- Boot media or packaging steps, if applicable
+- Secondary media or packaging steps, if applicable
 
 Prefer concrete data over narrative. Include commands and small scripts.
 
