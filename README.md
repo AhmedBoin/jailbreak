@@ -23,8 +23,6 @@ Jailbreak is a structure, not a list. Every project lives in its own folder unde
 
 The root README stays generic. Projects are discovered by browsing `domains/`, not by reading a fixed list here.
 
-The repository ships the structure and the workflow only. No target projects are bundled; `domains/` fills up as you add your own.
-
 ## Distribution policy
 
 This repository publishes analysis and guides, not ready-to-run cracks.

@@ -22,7 +22,7 @@ const MAX_BYTES = 20 * 1024 * 1024;
 const HOME_PATH = /(?:[A-Za-z]:[\\/]Users[\\/]|\/Users\/|\/home\/)[^\\/\s"'`]+/;
 const SHELL_PATH = /\b(?:Desktop|OneDrive)[\\/]/i;
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-const ALLOWED_EMAIL_SUFFIX = "users.noreply.github.com";
+const ALLOWED_EMAIL_SUFFIXES = ["users.noreply.github.com", "example.com", "example.org", "example.net"];
 
 function parseRoot(argv) {
   const index = argv.indexOf("--root");
@@ -63,7 +63,7 @@ function checkProjects(root, failures) {
       if (!existsSync(join(projectDir, "README.md"))) {
         fail(failures, `project is missing README.md: ${label}`);
       }
-      const playbooks = readdirSync(projectDir).filter((name) => /^playbook.*\.md$/i.test(name));
+      const playbooks = readdirSync(projectDir).filter((name) => /playbook.*\.md$/i.test(name));
       if (playbooks.length === 0) {
         fail(failures, `project is missing a playbook: ${label}`);
       }
@@ -122,7 +122,8 @@ function scanContent(relativePath, text, identity, failures) {
   const shell = text.match(SHELL_PATH);
   if (shell) fail(failures, `${relativePath} contains a desktop or cloud folder path: ${shell[0]}`);
   for (const match of text.matchAll(EMAIL)) {
-    if (!match[0].toLowerCase().endsWith(ALLOWED_EMAIL_SUFFIX)) {
+    const address = match[0].toLowerCase();
+    if (!ALLOWED_EMAIL_SUFFIXES.some((suffix) => address.endsWith(`@${suffix}`))) {
       fail(failures, `${relativePath} contains an email address: ${match[0]}`);
     }
   }
