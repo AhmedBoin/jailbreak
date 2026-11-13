@@ -4,7 +4,7 @@ Domain: `internet-and-downloads`
 
 Target: Internet Download Manager 6.43 build 18, 32-bit native build.
 
-Status: registered state, warning suppression, buy-page suppression, and update-check suppression verified locally.
+Status: registered state, warning suppression, buy-page suppression, update-check suppression, and helper-dialog suppression verified locally.
 
 This project is a guide only. It ships no patched binary, no keygen, and no compiled patcher. Build the patched file locally from the playbook if you need it.
 
@@ -18,8 +18,8 @@ This project is a guide only. It ships no patched binary, no keygen, and no comp
 ## Quick start
 
 1. Close `IDMan.exe`.
-2. Back up `IDMan.exe` outside the install directory.
-3. Apply the eight byte patches in the playbook.
+2. Back up `IDMan.exe` and `IDMGrHlp.exe` outside the install directory.
+3. Apply the byte patches in the playbook to IDMan.exe and IDMGrHlp.exe.
 4. Create the four registry values under `HKCU\Software\DownloadManager`.
 5. Start IDM and confirm `idmvers` changes from `v6.43b18 Trial` to `v6.43b18 Full`.
 6. Add a download and confirm that no counterfeit dialog and no fake-serial warning appear.
@@ -27,7 +27,7 @@ This project is a guide only. It ships no patched binary, no keygen, and no comp
 
 ## Patch summary
 
-All offsets are file offsets for the 6.43 build 18 `IDMan.exe`.
+All offsets are file offsets for the named binary. The helper offsets are for `IDMGrHlp.exe` 6.35.9.1.
 
 | Offset | Original | Patch | Purpose |
 |---:|---|---|---|
@@ -70,6 +70,15 @@ The cave at `0x896F4` is:
 
 It checks for `WM_CLOSE`, calls `ShowWindow(hwnd, SW_HIDE)`, and returns 0 through the normal function epilogue.
 
+### IDMGrHlp helper overlay
+
+`IDMGrHlp.exe` shows the periodic fake-serial dialogs. Apply these two patches to the helper:
+
+| Offset | Original | Patch | Purpose |
+|---:|---|---|---|
+| `0x52A1` | `FF 15 BC 34 44 00` | `31 C0 90 90 90 90` | Suppress the short fake-serial dialog |
+| `0x52C8` | `FF 15 BC 34 44 00` | `31 C0 90 90 90 90` | Suppress the long fake-serial dialog and its URL branch |
+
 ## Registry
 
 Create these values under `HKCU\Software\DownloadManager`:
@@ -89,13 +98,18 @@ The serial must be 23 characters with hyphens at positions 5, 11, and 17, for ex
 size            6,517,616 bytes
 pristine SHA256 A705C0154FAFC7CD509DECF165CB6F6C050B6521B40ADB6F730DD827C86051C7
 patched SHA256  BACF3DCC44073935FD72493A2578F0A7295FE2F447A9DCF68EC0C4CD3774A020
+
+IDMGrHlp.exe
+size            519,992 bytes
+pristine SHA256 B3B6281EA820EAE8192E50B30698CF4C3B8BC3D4376C978403BC9E18E5857C23
+patched SHA256  F5E7360A0C376247507218AC92392BD8B71AF70376E3BF1058C77AFED575B36D
 ```
 
-The patched hash is for the full base set plus the tray and exit overlay. A different patch order or a new build produces a different hash.
+The first patched hash is for `IDMan.exe` with the full base set plus the tray and exit overlay. The helper hash is for `IDMGrHlp.exe` with the two dialog patches. A different patch order or a new build produces a different hash.
 
 ## Updates
 
-An IDM update replaces `IDMan.exe` and restores the original bytes. Re-run the discovery workflow in the playbook, update the offsets, and re-apply the full set.
+An IDM update replaces `IDMan.exe` and `IDMGrHlp.exe` and restores the original bytes. Re-run the discovery workflow in the playbook, update the offsets, and re-apply the full set.
 
 The update check is disabled by the `0x55DD0` patch. Manual `Help -> Check for updates` remains a separate action.
 

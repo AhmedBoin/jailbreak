@@ -19,6 +19,7 @@ This playbook describes a local patch set. It does not ship a patched binary or 
 | Version | 6.43 build 18 |
 | Install directory | `%ProgramFiles(x86)%\Internet Download Manager` |
 | Main executable | `IDMan.exe` |
+| Helper executable | `IDMGrHlp.exe` (6.35.9.1) |
 | Architecture | x86 |
 | Framework | Native C++ with MFC-style dialogs |
 | Packer | None |
@@ -49,6 +50,18 @@ The fully patched build in this playbook has:
 size            6,517,616 bytes
 SHA256          BACF3DCC44073935FD72493A2578F0A7295FE2F447A9DCF68EC0C4CD3774A020
 ```
+
+### Helper reference build
+
+```text
+file            IDMGrHlp.exe
+size            519,992 bytes
+image base      0x00400000
+SHA256          B3B6281EA820EAE8192E50B30698CF4C3B8BC3D4376C978403BC9E18E5857C23
+.text           RVA 0x00001000, raw 0x00000400
+```
+
+The helper is a separate signed 32-bit MFC executable. It is launched by `IDMan.exe` and can also be started directly. It imports `MessageBoxA` at IAT `0x004434BC`.
 
 ## 3. License model
 
@@ -289,6 +302,12 @@ Search for `LastCheckQU` and `IDMGrHlp.exe`. The check function in 6.43 build 18
 - Wait at least 90 seconds. IDM must remain running and no `buy2.html` or `buy_idm2.html` browser process may appear.
 - Let a small download complete and compare its size with the server.
 
+### IDMGrHlp helper
+
+- Run `IDMGrHlp.exe` directly. It must exit with code 0 and show no window.
+- Start `IDMan.exe` and wait at least six minutes. No "fake Serial Number" dialog may appear.
+- `Get-Process IDMGrHlp` must not show a `MainWindowTitle` of `Internet Download Manager`.
+
 ### Patch verification
 
 Re-read every site after writing:
@@ -306,18 +325,31 @@ Re-read every site after writing:
 0x863E9  E9 79 01 00 00 90
 ```
 
+`IDMGrHlp.exe`:
+
+```text
+0x52A1  31 C0 90 90 90 90
+0x52C8  31 C0 90 90 90 90
+```
+
 The SHA256 of the patched file must be:
 
 ```text
 BACF3DCC44073935FD72493A2578F0A7295FE2F447A9DCF68EC0C4CD3774A020
 ```
 
+The SHA256 of the patched helper must be:
+
+```text
+F5E7360A0C376247507218AC92392BD8B71AF70376E3BF1058C77AFED575B36D
+```
+
 Any other hash means the patch set, order, or target build is wrong.
 
 ## 8. Rollback
 
-1. Close `IDMan.exe`.
-2. Restore the pristine `IDMan.exe` from the backup outside the install directory.
+1. Close `IDMan.exe` and `IDMGrHlp.exe`.
+2. Restore the pristine `IDMan.exe` and `IDMGrHlp.exe` from the backup outside the install directory.
 3. Delete `Serial`, `FName`, `LName`, and `Email` under `HKCU\Software\DownloadManager`.
 4. Start IDM and confirm the trial state returns.
 
@@ -339,6 +371,7 @@ Commit only this playbook, the project README, and local build notes. If a patch
 - `LastCheckQU` is a timestamp, not a boolean. Do not set it to a far-future value as the only update fix; patch the check function instead.
 - IDM replaces `IDMan.exe` on update. Re-run the discovery workflow after every update.
 - The registry values are per-user. A new Windows profile needs the four values again.
+- `IDMGrHlp.exe` is a separate signed helper. Its two fake-serial dialogs are not suppressed by any `IDMan.exe` patch. Patch the helper at file offsets `0x52A1` and `0x52C8`.
 
 ## 11. Tray and exit overlay
 
@@ -394,4 +427,35 @@ The application still exits later because the registration timer calls `ExitProc
 
 ```text
 BACF3DCC44073935FD72493A2578F0A7295FE2F447A9DCF68EC0C4CD3774A020
+```
+
+## 12. IDMGrHlp fake-serial dialogs
+
+`IDMGrHlp.exe` is the helper that shows the two fake-serial dialogs every five minutes. The dialogs are not produced by `IDMan.exe`, so the base and tray patches do not stop them. The helper imports `MessageBoxA` at IAT `0x004434BC` and calls it twice in the fake-serial check.
+
+| Site | Virtual address | File offset | Original bytes | Patch bytes | Purpose |
+|---|---:|---:|---|---|---|
+| 23 | `0x00405EA1` | `0x000052A1` | `FF 15 BC 34 44 00` | `31 C0 90 90 90 90` | Suppress the short `MB_OK` warning |
+| 24 | `0x00405EC8` | `0x000052C8` | `FF 15 BC 34 44 00` | `31 C0 90 90 90 90` | Suppress the long `MB_OKCANCEL` warning |
+
+The first call is the short `MB_OK | MB_ICONWARNING | MB_SYSTEMMODAL` dialog, flags `0x1030`. The second call is the long `MB_OKCANCEL | MB_ICONWARNING | MB_SYSTEMMODAL` dialog, flags `0x1031`. The long dialog's OK branch builds an encrypted URL and calls `ShellExecuteA` at `0x0040605D`. Replacing each six-byte `call dword [0x004434BC]` with:
+
+```text
+31 C0         xor eax, eax
+90 90 90 90   nop
+```
+
+returns 0, takes the no-URL branch, and lets the helper exit with code 0. The second dialog no longer has an OK path that can reach the browser.
+
+The helper is Authenticode-signed. The patch invalidates the signature. A direct shell launch may be refused; start it from IDM's normal path or with `UseShellExecute = $false`.
+
+### 12.1 Verification
+
+- Run `IDMGrHlp.exe` directly. It must exit with code 0 and show no window.
+- Start `IDMan.exe` and wait at least six minutes. No fake-serial dialog may appear.
+- `Get-Process IDMGrHlp` must not show `MainWindowTitle = Internet Download Manager`.
+- The patched helper SHA256 must be:
+
+```text
+F5E7360A0C376247507218AC92392BD8B71AF70376E3BF1058C77AFED575B36D
 ```
