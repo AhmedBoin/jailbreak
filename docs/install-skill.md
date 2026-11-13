@@ -17,14 +17,7 @@ skills/jailbreak/
 
 The skill body is plain Markdown and works in any harness on any OS. The scripts are optional Node 16+ helpers; without Node, follow the same steps by hand.
 
-The repository also ships thin wrappers for OpenCode and Claude Code:
-
-```text
-.opencode/skills/jailbreak/SKILL.md
-.claude/skills/jailbreak/SKILL.md
-```
-
-Each wrapper points at the canonical `skills/jailbreak/SKILL.md`.
+The repository commits one canonical copy of the skill. Install it by copying the `skills/jailbreak` folder into the harness skills directory; no per-harness copies live in the repository.
 
 ## Any harness with a skills directory
 
@@ -39,11 +32,11 @@ On Windows, copy the same folder with File Explorer or any file manager. The fol
 
 ## OpenCode
 
-The repository wrapper is already in place. OpenCode loads it when the repository is the working directory. For a global install, copy `skills/jailbreak` into `~/.config/opencode/skills/`.
+Copy `skills/jailbreak` into `~/.config/opencode/skills/` for a global install, or into the project `.opencode/skills/` folder. OpenCode also loads it when the repository is the working directory.
 
 ## Claude Code
 
-The repository wrapper is already in place. For a global install, copy `skills/jailbreak` into `~/.claude/skills/`.
+Copy `skills/jailbreak` into `~/.claude/skills/` for a global install, or into the project `.claude/skills/` folder.
 
 ## Codex CLI
 
