@@ -1,314 +1,308 @@
-# Internet Download Manager: generic crack playbook
+# Internet Download Manager: agent crack runbook
 
-This is a method for cracking Internet Download Manager 6.x, not a fixed list of offsets. The worked example is 6.43 build 18, but every section explains how to find the same decision point in a different build.
+Target: Internet Download Manager 6.x, 32-bit native builds. The worked example is 6.43 build 18. Every address in the worked example is a reference for that exact build, not a contract for the next one.
 
-The goal is a local build that:
+This document is written to be executed, not read. It assumes an agent with shell access, Python, and optionally Frida. Each phase ends with a gate. Do not start the next phase until the current gate passes. A build is done when the verification matrix in phase 9 passes, not when the binary stops showing the registration window.
 
-- reports a registered state,
-- shows no registration, counterfeit, licensed-to, buy-page, or update UI,
-- stays alive in the tray,
-- keeps crypt32 resident during HTTPS work,
-- runs the helper without dialogs.
+The one rule that matters: **patch the decision the running binary makes, not the bytes a static diff shows.** A byte-perfect manifest can still fail on a machine whose license state returns a different code. Confirm every license patch against a live hook before you trust it.
 
-Work on a copy. Keep a pristine backup and a patch manifest. Record every offset and byte you change, because the next build will move them.
+---
 
-## 0. How to use this playbook
+## 0. Contract
 
-1. Read sections 1 to 3 to understand the target and the crack surface.
-2. For a new build, run the discovery workflow in sections 4 to 8. Do not copy offsets from the worked example.
-3. For 6.43 build 18, section 12 is a reference map. Use it only after you have identified that exact build.
-4. Write every patch into a manifest. Section 10 contains a generic patcher that applies the manifest and recomputes the PE checksum.
-5. Run the verification matrix in section 13. A patch is not done until the matrix passes.
+### 0.1 Deliverables
 
-The central rule: patch decisions, not bytes. A byte sequence is a symptom of a decision. If you understand the decision, you can find it again after the compiler moves it.
+For a 6.x build, a finished crack has four artifacts:
 
-## 1. Target, lab, and baseline
-
-### 1.1 Files and architecture
-
-| File | Role |
+| Artifact | Purpose |
 |---|---|
-| `IDMan.exe` | Main 32-bit native application. License checks, UI, timers, downloads, crypt32 use. |
-| `IDMGrHlp.exe` | Separate 32-bit MFC helper. Shows periodic fake-serial dialogs. |
-| `IDMBroker.exe` | Optional broker in some builds. Check whether it participates in license or update checks. |
+| Patched `IDMan.exe` | The application with every layer below applied |
+| Patched `IDMGrHlp.exe` | The helper, with the fake-serial dialogs suppressed |
+| Manifest JSON | Every byte changed, with original and patch values |
+| Gate log | The output of `tooling/gate.ps1`, stored with the manifest |
 
-Determine the architecture before opening a disassembler:
+Never ship only the binary. The manifest is what makes the work reproducible and is the only defense against the next build silently breaking a patch.
+
+### 0.2 Layer model
+
+IDM has eight decision layers. Treat each as a separate problem with its own gate.
+
+| Layer | What it decides | Failure symptom if wrong |
+|---|---|---|
+| Registry identity | Serial, name, email, display version, launched path | Silent exit in under a second, or a permanent trial state |
+| Validators | Whether the serial and name are syntactically acceptable | Registration or fake-serial dialog |
+| Status machine | Registered, trial, counterfeit, expired, blocked | Registration dialog, 15-day warning, exit with code 2 |
+| UI | Registration, warning, licensed-to, buy page, update | Any of those windows |
+| Lifecycle | Timers, tray close, `PostQuitMessage`, `ExitProcess` | Process disappears while idle or when the window is closed |
+| Module lifetime | `crypt32.dll` load, use, unload | Crash with `CRYPT32.dll_unloaded` after HTTPS work |
+| Helper | Periodic fake-serial dialogs from `IDMGrHlp.exe` | A second window appears minutes after launch |
+| Integrity | PE checksum and self-checks | Exit, crash, or a repair prompt |
+
+### 0.3 Ordering rules
+
+1. Fix the status machine before touching the registration dialog. If the status still says unregistered, dismissing the dialog is read as a refusal and the process exits. Suppressing the dialog first only converts a visible problem into a silent one.
+2. Fix the lifecycle before any soak test. A 20 minute soak that ends in a self-exit tells you nothing about crypt32.
+3. Remove the crypt32 free before testing HTTPS. A crash after an HTTPS download is a lifetime bug, not a license bug.
+4. Recompute the checksum last, after every code patch, including caves.
+5. Test on a copy with `ExePath` pointed at the copy. Only write to `Program Files` after the gate passes.
+6. Kill every IDMan process before any launch test. IDM is single instance, and a second copy exits in a fraction of a second, which looks exactly like a broken patch.
+
+### 0.4 Workspace layout
 
 ```text
-PE32, 32-bit x86, image base 0x400000 in the 6.43 build.
+<work>/
+  pristine/IDMan.exe          original, never modified
+  pristine/IDMGrHlp.exe       original helper
+  build/IDMan.exe             manifest output
+  build/IDMGrHlp.exe
+  manifest/6.43b18.json       patch list
+  logs/                       gate output, hook output, WER queries
+  export/                     registry export before changes
 ```
 
-A 64-bit debugger will show the process, but its module list is the WOW64 host list. Use a 32-bit debugger or a 32-bit Toolhelp32 enumerator when you need the real module list.
+---
 
-### 1.2 Version identification
+## 1. Phase 1: identify and baseline
 
-Use at least two independent sources:
+### 1.1 Identify the build
 
-- File version resource: `IDMan.exe` properties, or `pefile` `VS_FIXEDFILEINFO`.
-- Registry `HKCU\Software\DownloadManager\idmvers`, for example `v6.43b18 Trial`.
-- The About dialog.
-- The installer name and build number.
+Use two independent sources. Do not trust the installer name.
 
-Record the version string exactly. Two builds with the same marketing version can have different offsets.
+| Source | Command or location |
+|---|---|
+| File version resource | `(Get-Item IDMan.exe).VersionInfo.FileVersion` or `pefile` |
+| Registry | `HKCU\Software\DownloadManager\idmvers`, for example `v6.43b18 Full` |
+| About dialog | Menu, About |
+| File size and hash | `Get-FileHash IDMan.exe -Algorithm SHA256` |
 
-### 1.3 Tooling
+Record the exact string. Two builds with the same marketing version can have different offsets.
+
+### 1.2 Back up and hash
+
+```powershell
+$src = 'C:\Program Files (x86)\Internet Download Manager'
+$work = 'C:\idm-work'
+New-Item -ItemType Directory -Force "$work\pristine" | Out-Null
+Copy-Item "$src\IDMan.exe"    "$work\pristine\IDMan.exe"    -Force
+Copy-Item "$src\IDMGrHlp.exe" "$work\pristine\IDMGrHlp.exe" -Force
+reg export 'HKCU\Software\DownloadManager' "$work\export\downloadmanager.reg" /y
+Get-FileHash "$work\pristine\IDMan.exe"    -Algorithm SHA256
+Get-FileHash "$work\pristine\IDMGrHlp.exe" -Algorithm SHA256
+```
+
+Never patch the only copy. The pristine file is the input to the manifest and the reference for every original byte.
+
+### 1.3 Record baseline behavior
+
+Launch the original once and record:
+
+1. The About dialog string and whether it says Trial or Full.
+2. Whether a registration window appears at startup.
+3. Every dialog title and its text.
+4. How long the process lives with no input.
+5. The exit code if it exits on its own.
+
+This baseline is how you tell a crack failure from stock behavior. Stock 6.43 on an expired trial, for example, shows `Internet Download Manager has not been registered for 15 days. IDM is exiting...` and quits. That is not caused by your patch.
+
+### 1.4 The ExePath gate
+
+IDM compares the launched image path with `HKCU\Software\DownloadManager\ExePath`. A mismatch causes a silent exit in roughly 0.1 to 0.3 seconds with no window. This looks like a broken patch and is usually just a path mismatch.
+
+Before every launch test:
+
+```powershell
+Set-ItemProperty 'HKCU:\Software\DownloadManager' -Name ExePath -Value '<exact path of the exe you are launching>'
+```
+
+The comparison is textual. `C:\Program Files (x86)\...` and `C:\PROGRA~2\...` are different strings. Use the same spelling you launch.
+
+### 1.5 Single instance
+
+IDM owns a named mutex and a window class. A second copy detects the first and exits almost immediately, usually with code 0. Dynamic tests must start from zero instances:
+
+```powershell
+Get-Process IDMan -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 1
+```
+
+If a probe exits in under a second, check for a running instance before you debug the binary. This exact confusion has produced more false "the crack is broken" reports than any patch bug.
+
+### 1.6 Tooling
 
 | Tool | Use |
 |---|---|
-| IDA Pro or Ghidra | Static analysis, xrefs, decompiler, jump tables. |
-| x64dbg (32-bit) | Breakpoints, memory patches, stack inspection, module list. |
-| Detect It Easy, PE-bear, `pefile` | Headers, sections, imports, resources, entry point, checksum. |
-| `strings`, `strings -el` | ASCII and UTF-16LE strings. |
-| Process Monitor | Registry, file, and network behavior. |
-| API Monitor | `RegQueryValue`, `DialogBoxParam`, `MessageBox`, `SetTimer`, `LoadLibrary`, `FreeLibrary`, `ShellExecute`. |
-| Frida | Runtime hooks, module load/unload, thread stacks, argument values. |
-| Windows Event Viewer | WER Application Error records, faulting module and offset. |
+| IDA Pro or Ghidra | Static analysis, xrefs, decompiler, jump tables |
+| x64dbg (32-bit) | Breakpoints, memory patches, module list |
+| `pefile`, `capstone` (Python) | Headers, sections, disassembly, patching |
+| Frida | Runtime hooks, status code, dialogs, module lifetime |
+| Process Monitor | Registry, file, and network behavior |
+| API Monitor | `RegQueryValue`, `MessageBox`, `SetTimer`, `LoadLibrary` |
+| Windows Event Viewer | WER `Application Error` records, faulting module and offset |
 
-### 1.4 Lab baseline
+`tooling/hook-status.py` in this repository is the Frida probe described in phase 2. `tooling/patch.py` applies a manifest and fixes the checksum. `tooling/gate.ps1` runs the static and dynamic acceptance checks.
 
-Before patching, record the unmodified behavior:
+### Gate 1
 
-1. Launch `IDMan.exe` from its install path.
-2. Read `idmvers` and open the About dialog.
-3. Open the Registration dialog from the menu.
-4. Add a small HTTP download and a small HTTPS download.
-5. Close the main window to the tray.
-6. Sample the process and the 32-bit module list at 5, 60, 300, and 600 seconds.
-7. Note every dialog title and every visible string.
-8. Export the registry key.
+- Version string recorded from two sources.
+- Pristine copies hashed and stored outside the install directory.
+- Registry exported.
+- Baseline behavior recorded, including whether the stock app already exits on its own.
+- One IDMan instance at most before any test.
 
-The HTTPS download is important: it loads `crypt32.dll` and exercises the module lifetime path. A tray soak without an HTTPS download can miss the crash entirely.
+---
 
-### 1.5 Address conversion
+## 2. Phase 2: runtime recon
 
-The disassembler shows VAs and RVAs; the patcher uses file offsets. Convert with the section table:
+### 2.1 Why runtime first
+
+IDM encrypts its license messages at runtime (the caption arrives as `IDM_emc_<base64>`), so searching the binary for `fake serial` or `not been registered` finds nothing. The strings are decrypted in a wrapper just before `MessageBoxW`. A static string search therefore sends you to the wrong function or nowhere.
+
+Worse, the status machine returns a small code whose value depends on the machine's registry state and elapsed days, not only on the build. The same binary can return 3 on one machine and 6 on another. Patching a `mov eax, 3` because a write-up said so is how a build passes a byte check and still opens the registration window.
+
+The reliable method is to hook the status dispatcher, read the code the running binary returns, and patch that code. Everything else in the license layer is confirmation.
+
+### 2.2 The status probe
+
+Start with the dispatcher. In 6.43 it is at file offset `0x4FA30`, RVA `0x50630`, called once at startup. If you do not know it yet, find it in phase 3.4, then come back.
 
 ```text
-file_offset = rva - section.VirtualAddress + section.PointerToRawData
-rva = file_offset - section.PointerToRawData + section.VirtualAddress
-va = image_base + rva
+python tooling/hook-status.py "<work>\build\IDMan.exe" --seconds 8 --dispatcher 0x50630 --wrapper 0x6D5C0
 ```
 
-Find the section that contains the RVA. In the 6.43 build the `.text` section maps RVA `0x1000` to file `0x400`, so the delta is `0xC00`, but do not hardcode the delta. Read the section table:
+The tool spawns the process suspended, installs hooks, resumes it, and prints:
 
-```python
-import pefile
-pe = pefile.PE("IDMan.exe")
-for section in pe.sections:
-    name = section.Name.decode(errors="ignore").rstrip("\x00")
-    print(name, hex(section.VirtualAddress), hex(section.PointerToRawData), hex(section.Misc_VirtualSize))
+```text
+[STATUS] t=0.14s code=0
+[result] alive_after_probe=True
 ```
 
-Check the section characteristics before writing a cave. A code cave must be in a section with `IMAGE_SCN_MEM_EXECUTE`.
+Read the code with the table in 3.4. A non-zero code is the patch target. Do not proceed to phase 3 until you have this number for the build and machine you are cracking.
 
-## 2. The crack surface
+The probe also logs `MessageBoxW` text and the caller's module offset, `DialogBoxParamW` calls with the procedure pointer, and `ExitProcess`, `TerminateProcess`, `RtlExitUserProcess`, `PostQuitMessage` calls with backtraces. That is enough to separate a dialog problem from an exit problem.
 
-IDM has eight decision layers. Patch the layer that produces the behavior you want to remove; do not patch a shared function unless you understand every caller.
+### 2.3 Reading the probe output
 
-| Layer | What it decides | Generic target |
+| Output | Meaning | Next move |
 |---|---|---|
-| Registry identity | Serial, name, email, display version, launched path | Correct values and a synthetic serial |
-| Validators | Whether the name and serial are syntactically acceptable | Return true, or bypass the caller |
-| Status dispatcher | Registered, trial, counterfeit, blocked, expired, exit | Force the registered path, or suppress the UI |
-| UI | Registration dialog, warning, licensed-to, buy page, update | Hide or skip the specific dialog or call |
-| Lifecycle | Timers, tray close, `PostQuitMessage`, `ExitProcess` | Keep the message loop and process alive |
-| Module lifetime | `crypt32.dll` load, use, unload | Keep one reference resident |
-| Helper | Periodic fake-serial dialogs from `IDMGrHlp.exe` | Skip the `MessageBox` calls |
-| Integrity | PE checksum and self-check | Recompute the checksum after patching |
+| `code=0` | Registered | Skip to phase 4, UI only if needed |
+| `code=3` | Counterfeit | Patch the counterfeit return, phase 3.5 |
+| `code=6` | Trial expired | Patch the trial-expired return, phase 3.5 |
+| `code=7` | Empty or unreadable serial | Fix the registry identity first, then re-probe |
+| `code=10` | Serial used elsewhere | Patch that return, or change the serial |
+| `code=12` | Blocked serial | Patch that return, or change the serial |
+| `MessageBox` with `IDM_emc_` caption | Encrypted nag reached | The status code is the cause; do not chase the message |
+| `ExitProcess` within 0.5s | Status path exits directly | Patch the status return, not the exit |
+| No status call at all | Wrong RVA, or the process never reached the check | Verify the binary, kill other instances, re-probe |
 
-### 2.1 Patch strategy
+### 2.4 The lifecycle probe
 
-- Smallest useful patch: if the only symptom is a warning, patch the warning call, not the whole license function.
-- Call-site patch over function patch: a function may be shared by the About dialog, the registration dialog, and the download path.
-- Stack discipline: know whether the call is cdecl or stdcall, and whether the caller cleans the arguments.
-- Preserve registers: a cave or stub that runs inside a dialog procedure must preserve registers the original code expects.
-- Verify each layer alone: patch the license UI, test; patch the lifecycle, test; patch crypt32, test. Do not stack unverified changes.
+Run the same tool with `--seconds 20` and no interaction. Any `PostQuitMessage` or `ExitProcess` in the first twenty seconds is a lifecycle bug, not a license dialog. Note the timestamp and backtrace.
 
-## 3. First contact: strings, imports, and registry
+### 2.5 The module probe
 
-### 3.1 Strings
+For the crypt32 layer, hook `LoadLibraryW`, `FreeLibrary`, and `LdrUnloadDll` and log the module name, return value, thread id, and stack. Add the hook to a local copy of `hook-status.js` when you reach phase 6. The point is to see whether something frees crypt32 while a worker still holds a function pointer.
 
-Search both ASCII and UTF-16LE:
+### Gate 2
 
-```text
-strings -a IDMan.exe
-strings -el IDMan.exe
-```
+- Status code read from the running binary and recorded with the build hash.
+- Dialog titles recorded, if any.
+- First twenty seconds contain no unexplained `PostQuitMessage` or `ExitProcess`.
+- You can state, in one sentence, which layer is producing the visible symptom.
 
-High-value strings:
+---
 
-| String | Layer |
-|---|---|
-| `Serial`, `FName`, `LName`, `Email` | Registry identity |
-| `Internet Download Manager Registration` | Registration dialog title |
-| `fake Serial Number`, `counterfeit` | Warning |
-| `This product is licensed to` | Licensed-to confirmation |
-| `Trial`, `days left`, `expired` | Status display |
-| `buy`, `buy2.html`, `buy_idm2.html` | Buy page |
-| `LastCheckQU`, `update` | Update check |
-| `main IDM executive file is damaged` | Integrity verdict |
-| `Crypt32.dll`, `CertFindChainInStore`, `CertGetCertificateChain` | Module lifetime |
-| `IDMGrHlp.exe` | Helper |
+## 3. Phase 3: license layer
 
-In IDA or Ghidra, use `Alt+B` or the string list, then xref each string to code. A string xref is the fastest way to find the surrounding function.
+### 3.1 Registry identity
 
-### 3.2 Imports
-
-Map the import table and find the call sites for these APIs:
-
-```text
-RegOpenKeyExW, RegQueryValueExW, RegSetValueExW
-DialogBoxParamW, CreateDialogParamW, EndDialog
-MessageBoxW, MessageBoxA
-SetTimer, KillTimer
-PostQuitMessage, ExitProcess
-ShellExecuteW, ShellExecuteA
-ShowWindow, PostMessageW
-LoadLibraryW, LoadLibraryA, GetProcAddress, FreeLibrary
-GetWindowTextLengthW, GetWindowTextW
-CreateToolhelp32Snapshot, Module32First, Module32Next
-```
-
-A call site is usually `FF 15 <IAT slot>` for an import. In a 32-bit build, the IAT slot is a VA in the `.idata` or `.rdata` range. Xref the slot to find every caller.
-
-### 3.3 Registry
-
-The license and identity values live under:
-
-```text
-HKCU\Software\DownloadManager
-```
+The license and identity values live under `HKCU\Software\DownloadManager`.
 
 | Value | Type | Role |
 |---|---|---|
 | `Serial` | REG_SZ | 23 characters, hyphens at positions 5, 11, 17 |
-| `FName` | REG_SZ | First name |
-| `LName` | REG_SZ | Last name |
+| `FName`, `LName` | REG_SZ | Name used by the licensed-to text |
 | `Email` | REG_SZ | Email |
-| `idmvers` | REG_SZ | Display version, for example `v6.43b18 Trial` or `v6.43b18 Full` |
-| `ExePath` | REG_SZ | The exact image path IDM expects to run from |
-| `LastCheckQU` | REG_SZ or REG_DWORD | Last update check timestamp |
+| `idmvers` | REG_SZ | Display version, for example `v6.43b18 Full` |
+| `ExePath` | REG_SZ | Exact image path IDM expects to run from |
+| `LastCheckQU` | REG_DWORD | Update check timestamp |
 
-The `ExePath` gate is a common source of confusion. If the launched image path does not match `ExePath`, IDM exits silently in about 0.12 seconds. Set `ExePath` to the exact path you launch, including the drive letter and the `Program Files (x86)` spelling.
-
-Use a random synthetic serial such as `A7K2M-9Q4XZ-3V8NB-6T1WP`. The well-known `12345-67890-12345-67890` is blacklisted in current builds and triggers the licensed-to path even when the UI is patched.
-
-Set the registry values before the first patched launch:
+Set a synthetic serial that matches the format. The famous `12345-67890-12345-67890` is blacklisted and triggers the licensed-to path even with the UI patched.
 
 ```powershell
 $key = 'HKCU:\Software\DownloadManager'
-New-Item -Path $key -Force | Out-Null
-Set-ItemProperty -Path $key -Name Serial -Value 'A7K2M-9Q4XZ-3V8NB-6T1WP'
-Set-ItemProperty -Path $key -Name FName  -Value 'Test'
-Set-ItemProperty -Path $key -Name LName  -Value 'User'
-Set-ItemProperty -Path $key -Name Email  -Value 'test@example.com'
-Set-ItemProperty -Path $key -Name ExePath -Value 'C:\Program Files (x86)\Internet Download Manager\IDMan.exe'
+Set-ItemProperty $key -Name Serial -Value 'A7K2M-9Q4XZ-3V8NB-6T1WP'
+Set-ItemProperty $key -Name FName  -Value 'Test'
+Set-ItemProperty $key -Name LName  -Value 'User'
+Set-ItemProperty $key -Name Email  -Value 'test@example.com'
+Set-ItemProperty $key -Name ExePath -Value 'C:\Program Files (x86)\Internet Download Manager\IDMan.exe'
 ```
 
-### 3.4 Build an anchor table
+Do not set `idmvers` by hand if the status patch works. The app writes it. Forcing `Full` on top of an expired state is one way to reach the fake-serial branch with a mismatched display string.
 
-Before patching, fill a table like this:
+### 3.2 Find the validators
 
-| Anchor | Address or offset | How found | Confidence |
-|---|---|---|---|
-| Serial validator 1 | | xref `Serial` string | |
-| Serial validator 2 | | nearby function | |
-| Status function | | caller of validators | |
-| Status switch | | jump table after status call | |
-| Registration dialog proc | | `DialogBoxParamW` xref | |
-| Warning function | | xref `fake Serial Number` | |
-| Licensed-to call | | xref `This product is licensed to` | |
-| Buy-page call | | xref `buy` or `ShellExecute` | |
-| Update check | | xref `LastCheckQU` | |
-| `PostQuitMessage` sites | | IAT xrefs | |
-| `ExitProcess` sites | | IAT xrefs | |
-| Crypt32 load | | xref `Crypt32.dll` | |
-| Crypt32 free | | xref cached handle | |
-| Helper dialogs | | `MessageBox` xrefs in helper | |
+Start from the registry value name. The UTF-16 string `Serial` is at file `0x30589C`, VA `0x706C9C`. Its `push` references are the license readers:
 
-The rest of this playbook fills the rows.
+```text
+0x122C36 and 0x122FB0 in a 6.43 build, RVAs 0x123836 and 0x123BB0
+```
 
-### 3.5 Code caves
-
-A code cave is a run of unused bytes inside an executable section. `CC` (`int3`) padding and `00` padding are common. Use a cave for the dialog stub, the entry stub, or a trampoline.
-
-1. Find a run of at least the stub size inside `.text`.
-2. Confirm that no xref points into the run. In IDA or Ghidra, check the address and the surrounding function.
-3. Prefer `CC` padding. `00` bytes decode as `add [eax], al` if execution reaches them, but they are usable as cave data once you overwrite them completely.
-4. Keep the cave in the same section so it is executable and the RVA mapping is simple.
-5. If you add a new section, set `IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ`, update `SizeOfImage`, and expect integrity checks to notice the new section.
-
-The 6.43 build uses `0x2D6A4C` for the entry stub and `0x2D6A80` for the dialog cave. Both are in `.text` padding.
-
-## 4. License validation
-
-### 4.1 Find the validators
-
-Start from the registry value names. A validator or status reader usually:
+A validator or status reader typically:
 
 1. Opens `HKCU\Software\DownloadManager`.
-2. Queries `Serial`, `FName`, `LName`, and `Email`.
-3. Checks the serial length and hyphen positions.
-4. Returns a boolean or a small status code.
+2. Queries `Serial`, `FName`, `LName`, `Email`.
+3. Checks length 23 and hyphens at 5, 11, 17.
+4. Returns a boolean in `AL` or a status code in `EAX`.
 
-In the disassembler, xref the UTF-16 string `Serial` to the `RegQueryValueExW` call. The function around that call is a validator or a status reader. Repeat for `FName`, `LName`, and `Email`. If all four are read in one function, that function is the status reader.
-
-If the strings are obfuscated or built dynamically, set a breakpoint on `RegQueryValueExW` and log the value name and output buffer for each call. The license values appear at startup.
-
-Look for these constants:
+Constants worth anchoring on:
 
 | Constant | Meaning |
 |---|---|
 | `0x17` (23) | Serial length |
-| `0x2D` (`-`) | Hyphen character |
-| `5`, `0xB` (11), `0x11` (17) | Hyphen positions |
-| `0x100` or `0x104` | Buffer size for `RegQueryValueExW` |
+| `0x2D` (`-`) | Hyphen |
+| `5`, `0xB`, `0x11` | Hyphen positions |
+| `0x100`, `0x104` | Registry buffer size |
 
-A typical validator prologue is `55 8B EC` or `8B FF 55 8B EC`. The return value is in `AL` or `EAX`.
+If the strings are built dynamically, break on `RegQueryValueExW` and log the value name and output buffer. The license values appear at startup.
 
-If the serial format changes, find the new length and separator checks, or patch the validator to return true and use a value that the rest of the code accepts. If the validator is inlined into the status reader, patch the status function or the UI instead of trying to isolate the validator.
+### 3.3 Patch the validators
 
-### 4.2 Patch the validators
-
-If a validator returns a boolean in `AL`:
+Boolean in `AL`:
 
 ```text
 B0 01 C3        mov al, 1 ; ret
 ```
 
-If it returns an `int` in `EAX`:
+Integer in `EAX`:
 
 ```text
 31 C0 FF C0 C3  xor eax, eax ; inc eax ; ret
 ```
 
-If the function is `__stdcall` with arguments, a bare `ret` is wrong. Use `ret n` where `n` is the argument byte count, or patch the return-value instruction instead. Check the caller's cleanup:
+Stack discipline decides whether a bare `ret` is legal. If the caller cleans arguments with `add esp, n`, the function is cdecl and `ret` is correct. If the caller does not clean, the function is stdcall and you need `ret n` where `n` is the argument byte count. A wrong cleanup crashes on the next `ret`, not at the patch site.
 
-```text
-call validator
-add esp, 8
-```
+The 6.43 sites are `0x5A4B0` and `0x5A830`, both `55 8B EC` to `B0 01 C3`.
 
-If the caller uses `add esp`, the function is cdecl, and `ret` is correct. If the caller does not clean the stack, the function is stdcall, and you need `ret n`.
+### 3.4 Find the status dispatcher
 
-### 4.3 Find the status dispatcher
+The dispatcher is the function that combines the validator results and returns the license code. In 6.43 it is a large function starting at file `0x4FA30` (RVA `0x50630`) with a single caller at RVA `0x5250A`.
 
-The status dispatcher calls the validators and returns a code. In 6.43 the codes are:
+The code values observed in 6.43:
 
-| Status | Meaning |
-|---:|---|
-| 0 | Registered |
-| 1 | Counterfeit warning |
-| 2 | Blocked serial details |
-| 3 | Exiting |
-| 6 | Trial expired: registration dialog at startup, then the "not been registered for 15 days" warning and exit |
-| 7 | Empty or unreadable serial |
-| 10 | Serial used on another computer |
-| 12 | Blocked serial |
+| Code | Meaning | Evidence |
+|---:|---|---|
+| 0 | Registered | Normal return on a working build |
+| 1 | Counterfeit warning path | Return immediate |
+| 2 | Blocked serial details | Return immediate |
+| 3 | Counterfeit | `B8 03 00 00 00` at file `0x50C1C` |
+| 6 | Trial expired | `B8 06 00 00 00` at file `0x50083`, observed on an expired machine |
+| 7 | Empty or unreadable serial | `B8 07 00 00 00` at file `0x50CFB` |
+| 10 | Serial used on another computer | `B8 0A 00 00 00` at file `0x50D5C` |
+| 12 | Blocked serial | `B8 0C 00 00 00` at file `0x50DBD` |
 
-Codes 6, 7, and 12 were read from the dispatcher at runtime, not from the source. Confirm each code with an `onLeave` hook on the dispatcher return value before patching it: the day counter that drives code 6 is state, so a build that returns 3 on one machine can return 6 on another with the same binary.
+Codes 6, 7, and 12 were read from the running binary, not from a write-up. Confirm the code on your machine with the phase 2 probe before patching. The day counter that produces 6 is registry state, so a byte-identical binary can return 3 on one machine and 6 on another.
 
-The caller switches on the status through a jump table:
+The caller switches on the code, often through a jump table:
 
 ```text
 call status_function
@@ -317,61 +311,56 @@ ja default
 jmp dword ptr [eax*4 + table]
 ```
 
-Find the table and map each entry to a case. Each case either shows a dialog, opens a buy page, or exits.
+Each case either shows a dialog, opens a buy page, or exits. Map the table before patching so you know which case you are removing.
 
-### 4.4 Patch the status path
+### 3.5 Patch the status return
 
-Three strategies, from least to most invasive:
-
-1. Patch the UI that the status case shows. This is the safest when the status also feeds the About display.
-2. Patch the switch so the registered case is always taken. Replace the jump table entries or the initial comparison.
-3. Force the status function to return 0:
+Patch the immediate that feeds the shared epilogue, not the caller and not the whole function. For every code the machine can return:
 
 ```text
-31 C0 C3        xor eax, eax ; ret
+B8 03 00 00 00  ->  B8 00 00 00 00      counterfeit becomes registered
+B8 06 00 00 00  ->  31 C0 90 90 90      trial expired becomes registered
 ```
 
-Test the About dialog after strategy 3. Some builds use the same status for the display string, so forcing 0 can show `Trial` even though the warning is gone. In 6.43 this happened; the robust build keeps the status function original and suppresses the UI.
+The five-byte `xor eax, eax` plus nops is used when the immediate is followed by a jump to the epilogue; it keeps the instruction length and does not disturb the flags the epilogue reads. `B8 00 00 00 00` is equivalent when only the value matters. Either is fine as long as the byte count matches.
 
-A fallback is to patch the counterfeit immediate:
+Rules:
 
-```text
-B8 03 00 00 00  ->  B8 00 00 00 00
-```
+- Patch only codes that the running binary actually returns. A manifest full of speculative patches is harder to audit than one with three verified sites.
+- Do not replace the whole dispatcher with `31 C0 C3`. Some builds use the same function to produce the About display string, so forcing 0 can show `Trial` while suppressing the warning. Patch the return values instead.
+- Re-probe after the patch. The gate expects code 0.
 
-This changes only the counterfeit return, not the whole status function.
+### 3.6 Why not just close the registration dialog
 
-The same treatment applies to every non-zero return that the machine can produce. Patch the immediate at the `mov eax, imm32` that feeds the shared epilogue, not the caller. In the 6.43 build the trial-expired return is:
+It is tempting to leave the status at 6 and close the registration window with a cave. That produces a worse failure. The startup path treats a dismissed registration dialog as a refusal: it suppresses the warning (which you patched), then calls the exit path. The visible dialog becomes a silent exit with code 2 in about 0.2 seconds, and the browser integration reports `0x80010108` because IDM is no longer running.
 
-```text
-B8 06 00 00 00  ->  31 C0 90 90 90
-```
+The dialog cave in phase 4.1 is a suppression layer for builds that show the dialog for a reason you have not found yet. It is not a license fix.
 
-Patch only the code the running build actually returns. A binary that passes a static byte check can still show the registration dialog if the machine returns 6 and only 3 was patched. Hook the dispatcher, read the value, patch that value.
+### Gate 3
 
-### 4.5 Verify the license layer
+- Status probe returns 0 on the patched build.
+- About dialog shows the registered state, not Trial.
+- No registration window at startup.
+- No fake-serial or 15-day warning.
+- Process is still alive after 30 seconds with no interaction.
 
-- `idmvers` changes from `Trial` to `Full`.
-- The About dialog shows the registered state.
-- The Registration dialog does not show a counterfeit warning.
-- A download does not show a fake-serial warning.
-- No buy page opens.
+---
 
-## 5. UI suppression
+## 4. Phase 4: UI suppression
 
-The license layer may still show dialogs even when the validators return true. Suppress the specific UI instead of forcing the whole status machine.
+Only start this phase after gate 3. With the status at 0 these patches are insurance, not the primary fix. They still matter because a future build may reach the UI through a path your status patch does not cover.
 
-### 5.1 Registration dialog
+### 4.1 Registration dialog
 
-Find the dialog template and the dialog procedure.
+Find the dialog procedure:
 
 1. List resources with PE-bear, Resource Hacker, or `pefile`.
 2. Find the dialog whose title is `Internet Download Manager Registration` or whose controls include `Serial`, `First Name`, `Last Name`, `Email`.
 3. Find the `DialogBoxParamW` or `CreateDialogParamW` call that uses the template.
-4. The `lpDialogFunc` argument is the dialog procedure. In x86 stdcall, the call site pushes the arguments right to left, so the procedure pointer appears as a `push offset proc` near the call.
-5. The procedure prologue is usually `8B FF 55 8B EC` (`mov edi, edi; push ebp; mov ebp, esp`).
+4. The `lpDialogFunc` argument is the procedure. In x86 stdcall the arguments are pushed right to left, so the procedure pointer appears as `push offset proc` near the call.
+5. The prologue is usually `8B FF 55 8B EC`.
 
-The procedure receives:
+Procedure arguments:
 
 ```text
 [ebp+8]   HWND
@@ -382,17 +371,7 @@ The procedure receives:
 
 `WM_INITDIALOG` is `0x110`.
 
-### 5.2 The title-length cave
-
-A robust way to close only the registration dialog is a small cave that checks the window title length and forwards every other dialog to the original procedure.
-
-At the procedure entry, write a 5-byte jump:
-
-```text
-E9 <rel32>      jmp cave
-```
-
-The cave does this:
+A cave that closes only the registration dialog:
 
 ```text
 8B FF                    mov edi, edi
@@ -425,78 +404,70 @@ forward:
 E9 <rel32>               jmp original_after_prologue
 ```
 
-`0x26` is 38 decimal, the length of `Internet Download Manager Registration`. If the title changes in a new build, count the new title or replace the length check with a `GetWindowTextW` string compare.
+`0x26` is 38, the length of `Internet Download Manager Registration`. `pop_rva` is the RVA of the instruction after `call $+5`, where `pop ebx` lands. `pushad` and `popad` preserve the registers the original procedure expects. `PostMessageA(hwnd, WM_CLOSE, 0, 0)` closes the dialog and returning 1 says the message was handled.
 
-The cave uses `pushad` and `popad` so the original procedure's registers survive. It calls `GetWindowTextLengthW` and `PostMessageA` through the IAT. `PostMessageA(hwnd, WM_CLOSE, 0, 0)` closes the dialog; returning 1 tells Windows the message was handled. `pop_rva` is the RVA of the instruction after the `call $+5`, where `pop ebx` lands. In the 6.43 cave it is `0x2D7698`.
+In 6.43 the procedure is at file `0x250B62` (RVA `0x251762`), the cave at file `0x2D6A80`, and the IAT slots are `GetWindowTextLengthW` at RVA `0x2D87E4` and `PostMessageA` at RVA `0x2D87E8`.
 
-If the dialog title is not stable, use a control ID or a class name instead. Enumerate the dialog's children with `GetDlgItem` and check for a known control.
+If the title changes, count the new title or replace the length check with `GetWindowTextW` and a string compare. If the dialog is created with `CreateDialogParamW` and shown later with `ShowWindow`, patch the creation or the show call instead.
 
-### 5.3 Warning function
+Remember 3.6: this cave does not fix an unregistered status.
 
-Find the fake-serial warning:
+### 4.2 Warning sites
 
-1. Search for `fake Serial Number` or `counterfeit`.
-2. Xref the string to the function that builds the message.
-3. If the function returns a value, patch its entry:
+IDM's license messages are decrypted at runtime, so plain string search fails. Work from the message wrapper instead. In 6.43 the wrapper is at file `0x6C9C0` (RVA `0x6D5C0`); it builds the `IDM_emc_...` caption and calls `MessageBoxW` at RVA `0x6D7CA`. The wrapper has four callers:
 
 ```text
-31 C0 C3        xor eax, eax ; ret
+RVA 0x74899, 0x749EB, 0x74B78, 0x74CD8
 ```
 
-4. If the function is void, patch it to `C3` (`ret`).
-5. If the string is used directly in a `MessageBoxW` call, patch the call site:
+Each caller is a small message helper that formats text and returns the MessageBox result. The dispatcher does not call them directly; the status case or the download path does.
 
-```text
-FF 15 <IAT MessageBoxW>  ->  31 C0 90 90 90 90
-```
+Two ways to suppress:
 
-This skips the call and returns 0. `MessageBoxW` is stdcall, so removing the call also removes its argument cleanup. If arguments were pushed immediately before the call, add the matching `add esp, n`, or use a `ret n` gadget that cleans the arguments and returns to the next instruction. In the 6.43 warning sites the arguments are not left on the stack by this patch.
+1. Patch the shared warning function to return 0. In 6.43 that function starts at file `0x73B60`, patched to `31 C0 C3`.
+2. Patch the call sites that push the warning text. The 6.43 manifest patches the two known sites at file `0x93B5F` and `0x74E84` with `31 C0 90 90 90`.
 
-There may be two warning call sites. Patch both, or patch the shared function. If the string is built dynamically and has no direct xref, find the `MessageBoxW` calls in the status case and patch the one that shows a license message.
+If arguments are pushed immediately before a patch site, removing the call leaves them on the stack. Add the matching `add esp, n`, or replace the call with a `ret n` gadget. In 6.43 the two sites have no pending arguments.
 
-### 5.4 Licensed-to confirmation
+### 4.3 Licensed-to confirmation
 
-Search for `This product is licensed to`. The string is often formatted with `wsprintfW` and then passed to `MessageBoxW` or a custom dialog.
-
-Patch the call that shows the confirmation:
+The licensed-to text is formatted and then shown. Patch the call that shows it:
 
 ```text
 E8 <rel32>      ->  31 C0 90 90 90
 ```
 
-or patch the function that builds and shows it. If arguments were pushed immediately before the call, add the matching `add esp, n` or use a `ret n` gadget. If the string is built dynamically, find the `MessageBoxW` or custom dialog call in the download path and patch it. If the dialog is a custom resource, use the same title-length cave technique.
+The 6.43 site is file `0x893A6`. If the call takes pushed arguments, clean them. If the dialog is a custom resource rather than a message box, use the title or control check from 4.1.
 
-### 5.5 Buy page and update check
+### 4.4 Buy page
 
-Buy page:
+- Search for `buy`, `buy2.html`, `buy_idm2.html`, and any URL builder.
+- Xref the string to the URL builder or to `ShellExecuteW`.
+- Patch the builder to return 0, or patch the `ShellExecuteW` call.
+- Check the timer path too. In 6.43 there is a timer that opens the buy page after a delay: file `0x7EA43` patched to `31 C0 90 90 90`, and the timer `ShellExecuteA` call at file `0x914DD` replaced with a `ret 0x18` gadget.
+- The builder itself is patched to `C3` at file `0x7C1A0`.
 
-- Search for `buy`, `buy2.html`, `buy_idm2.html`, or a URL.
-- Xref the string to the URL builder or `ShellExecuteW`.
-- Patch the `ShellExecuteW` call to skip, or patch the URL builder to return 0.
-- If the URL is built dynamically, inspect the `ShellExecuteW` arguments and patch the call that opens a browser.
-- Check the timer path as well; a timer may open the buy page after a delay.
-
-Update check:
+### 4.5 Update check
 
 - Search for `LastCheckQU`.
 - Find the function that reads or writes it.
-- Patch the check function to return 0, or patch the call that performs the HTTP request.
-- If `LastCheckQU` is absent in a new build, log WinInet or WinHttp calls during startup and patch the check that runs on a timer.
-- `Help -> Check for updates` may be a separate manual path. If you want to disable both, patch the shared function, not only the timer.
+- Patch the check function to return 0. In 6.43 that is file `0x55DD0`, `55 8B EC` to `33 C0 C3`.
+- If `LastCheckQU` is absent in a new build, log WinInet or WinHttp calls during startup and patch the timer that performs the request.
+- `Help -> Check for updates` may be a separate manual path. Patch the shared check, not just the timer.
 
-### 5.6 Verify the UI layer
+### Gate 4
 
-- Registration menu: no registration window, no warning, no licensed-to.
+- Registration menu: no window, no warning, no licensed-to.
 - About: registered state, no trial counter.
-- Download: only the normal `Download File Info` and `Download complete` windows.
-- No `buy2.html` or `buy_idm2.html` process.
+- Download: only `Download File Info` and `Download complete`.
+- No browser process opened with `buy2.html` or `buy_idm2.html`.
 - `LastCheckQU` does not change during a normal launch.
 
-## 6. Lifecycle: timers, tray, quit, and exit
+---
 
-The UI can be quiet while the process still terminates itself. Treat the lifecycle as a separate layer.
+## 5. Phase 5: lifecycle
 
-### 6.1 Enumerate timers
+### 5.1 Enumerate timers
 
 Find every `SetTimer` call:
 
@@ -508,8 +479,6 @@ push <hwnd>
 call SetTimer
 ```
 
-Common intervals:
-
 | Interval | Milliseconds | Immediate |
 |---:|---:|---|
 | 10 seconds | 10,000 | `0x2710` |
@@ -519,171 +488,201 @@ Common intervals:
 | 10 minutes | 600,000 | `0x927C0` |
 | 20 minutes | 1,200,000 | `0x124F80` |
 
-If the callback argument is `NULL`, the window procedure receives `WM_TIMER` (`0x113`). Find the `cmp [ebp+0xC], 0x113` case and inspect each timer ID branch.
+When the callback is `NULL`, the window procedure receives `WM_TIMER` (`0x113`). Inspect each timer id branch for `PostQuitMessage`, `ExitProcess`, or a dialog that leads to exit.
 
-Do not assume the 20-minute timer is the self-exit. In 6.43 the four 20-minute arms were exonerated; the real exit was the crypt32 unload race. Inspect the case body for `PostQuitMessage`, `ExitProcess`, or a dialog that leads to exit.
+Do not assume the 20 minute timer is the self-exit. In 6.43 the 20 minute arms were exonerated; the real crash was the crypt32 unload. Inspect the case bodies.
 
-### 6.2 PostQuitMessage
+In 6.43 the exit timers are neutralized by raising their intervals:
 
-Find the `PostQuitMessage` IAT slot and every xref. A call site is usually:
+| File offset | Original | Patch | Effect |
+|---|---|---|---|
+| `0x8DA76` | `68 10 27 00 00` | `68 FF FF FF 7F` | 10 second timer becomes INFINITE |
+| `0x6C073` | `8D 8E 20 4E 00 00 51` | `68 FF FF FF 7F 90 90` | 32 second timer becomes INFINITE |
+| `0x6C08C` | `75 41` | `90 90` | Remove the timer exit branch |
+| `0x6C09A` | `E8 B1 72 FB FF` | `83 C4 0C 90 90` | Skip the 12 second registration timer |
+| `0x76666`, `0x8DA5C` | `68 20 BF 02 00` | `68 FF FF FF 7F` | 3 minute timer arms become INFINITE |
+
+`0x7FFFFFFF` is the maximum `UINT`, which `SetTimer` treats as an interval far beyond any session.
+
+### 5.2 PostQuitMessage
+
+Find the `PostQuitMessage` IAT slot and every xref. A call site:
 
 ```text
 6A 00                 push 0
 FF 15 <IAT slot>      call dword ptr [PostQuitMessage]
 ```
 
-Replace the call with:
+Replace with:
 
 ```text
 58                    pop eax
 90 90 90 90 90        nop x5
 ```
 
-`pop eax` removes the argument that the preceding `push` placed, so the stack depth, return address, and SEH chain stay unchanged. The call is skipped, and the message loop continues. Confirm that the `push 0` is immediately before the call. If the argument is pushed earlier or by a different instruction, use a `ret` gadget instead, or adjust the stack explicitly.
-
-If the site is a tail jump:
+`pop eax` removes the argument the preceding `push` placed, so the stack depth, return address, and SEH chain stay intact. This works only when the `push 0` is immediately before the call. For a tail jump:
 
 ```text
 FF 25 <IAT slot>      jmp dword ptr [PostQuitMessage]
 ```
 
-replace it with:
+replace with:
 
 ```text
 C3 90 90 90 90 90     ret ; nop x5
 ```
 
-### 6.3 ExitProcess
+The 6.43 sites are `0x14E902`, `0xB7E27`, `0xE21BE`, `0xE2647`, and the thunk at `0x25F5A0`.
 
-Find the `ExitProcess` IAT slot and every xref. A direct call site is:
+### 5.3 ExitProcess
+
+Find the IAT slot and every xref. A direct call:
 
 ```text
 FF 15 <IAT slot>      call dword ptr [ExitProcess]
 ```
 
-Patch it to a `ret` gadget:
+Patch to a `ret` gadget:
 
 ```text
 E8 <rel32> 90         call ret_gadget ; nop
 ```
 
-The `call` pushes a return address; the gadget's `ret` returns to the next instruction. The original argument stays on the stack for the caller's cleanup. This preserves the stack and avoids a hard return from the middle of a function.
+The `call` pushes a return address and the gadget's `ret` returns to the next instruction. The original argument stays on the stack for the caller's cleanup. This preserves the stack and avoids returning from the middle of a function. Find a lone `C3` in a padding area of the same section for the rel32. In 6.43 a `ret 4` gadget at RVA `0x12DF` is used, which also discards the argument:
 
-Find a lone `C3` in a padding area of the same section and use its VA for the rel32. If the call site has no argument or the caller does not clean the stack, `31 C0 90 90 90 90` may work, but verify the stack after the patch.
+```text
+E8 <rel32 to 0x12DF> 90
+```
 
-### 6.4 Tray close
+The five 6.43 sites are `0x101D4`, `0x4D006`, `0x6640B`, `0x6C0CF`, `0x120D5C`. The site at `0x101D4` also has an `int3` at `0x101DA`; patch it to `C3` so a stray call returns instead of breaking.
 
-Find the window procedure's `WM_CLOSE` (`0x10`) case. Patch it to hide the window instead of destroying it:
+### 5.4 Tray close
+
+Find the `WM_CLOSE` (`0x10`) case in the main window procedure and make it hide the window:
 
 ```text
 ShowWindow(hwnd, SW_HIDE)
 return 0
 ```
 
-A cave is usually easier than inlining:
+A cave is easier than inlining. The 6.43 site is file `0x88C15` (RVA `0x89815`) redirected with `E9 DA 0A 00 00` to a cave at file `0x896F4`:
 
 ```text
 8B 75 08              mov esi, dword ptr [ebp+8]
 83 FE 10              cmp esi, 0x10
 74 0A                 je close
-...
+8B C6                 mov eax, esi
+83 E8 01              sub eax, 1
+E9 17 F5 FF FF        jmp 0x8981D
 close:
 6A 00                 push 0                 ; SW_HIDE
-56                    push esi               ; hwnd
-FF 15 <ShowWindow>    call dword ptr [ShowWindow]
-...
+FF 77 20              push dword ptr [edi+0x20]
+FF 15 DC 87 6D 00     call dword ptr [ShowWindow]
+E9 34 F5 FF FF        jmp 0x8984A
 ```
 
-In 6.43 the `WM_CLOSE` case at `0x88C15` jumps to a cave at `0x896F4`. The cave calls `ShowWindow(hwnd, SW_HIDE)` and returns 0.
+The first jump returns to the original `je` after replaying the stolen prologue. The second jump enters the original dispatch table after the `WM_CLOSE` case. Check the jump targets against the pristine disassembly before trusting them; a one-byte misalignment crashes on the first close.
 
-### 6.5 Verify the lifecycle
+### 5.5 Exit codes
 
-- Close the main window. The window disappears, the tray icon remains, and the process stays alive.
-- Wait at least 40 minutes in the tray.
-- No Application Error 1000 record for the pid.
-- The process is still alive, and the 32-bit module list still contains `crypt32.dll` if an HTTPS download was performed.
+| Code | Meaning | How to confirm |
+|---:|---|---|
+| 0 | Clean shutdown, or a second instance handing off to the first | Check for a running IDMan before launching |
+| 1 | Generic failure | Check the WER record |
+| 2 | Dialog-cancel exit path, or an early abort | Reproduce under the phase 2 probe; look for `EndDialog` then exit |
+| `0xC0000005` | Access violation | Check WER for the faulting module |
+| `0xC0000409` | Stack cookie or fast-fail | A patch broke a function epilogue or a stack cleanup |
 
-## 7. Crypt32 lifetime
+A process that exits with code 2 within half a second of launch, with no window, is either a second instance or the registration dialog being dismissed. Distinguish them before patching anything else.
 
-### 7.1 Symptom
+### Gate 5
+
+- Close the window: it disappears, the tray icon remains, the process stays alive.
+- Ten minutes later the process is still alive in the tray.
+- No WER `Application Error` for the pid.
+- `crypt32.dll` still loaded after an HTTPS download (phase 6).
+
+---
+
+## 6. Phase 6: crypt32 lifetime
+
+### 6.1 Symptom
 
 The process disappears without a dialog. Windows Error Reporting records:
 
 ```text
 Faulting module name: CRYPT32.dll_unloaded
 Exception code: 0xc0000005
-Fault offset: 0x0005d220 (varies by crypt32 build)
+Fault offset: 0x0005d220 (varies with the crypt32 build)
 ```
 
-The faulting instruction pointer is inside a module that has already been unmapped. The offset is not an export. The process uptime at death varies from 33 seconds to 47 minutes; the 20 to 25 minute window is a cluster, not a timer.
+The instruction pointer is inside a module that has been unmapped. The offset is not an export. Uptime at death varies from about 30 seconds to 45 minutes; the 20 to 25 minute cluster is not a timer.
 
-### 7.2 Mechanism
+### 6.2 Mechanism
 
-IDM uses crypt32 for certificate chain validation during HTTPS work:
+1. IDM loads `Crypt32.dll` and caches the handle in a global.
+2. It resolves `CertFindChainInStore` or `CertGetCertificateChain` and caches the pointer.
+3. A worker thread calls the cached pointer during HTTPS work.
+4. A destructor or certificate path calls `FreeLibrary`.
+5. The unload lands while the worker is inside the module, and the next fetch faults.
 
-1. `LoadLibraryA("Crypt32.dll")` or `LoadLibraryW(L"Crypt32.dll")` loads the module.
-2. The handle is cached in a global.
-3. `GetProcAddress("CertFindChainInStore")` resolves the function.
-4. The pointer is cached in another global.
-5. A worker thread calls the cached pointer.
-6. A destructor or certificate path calls `FreeLibrary` or `LdrUnloadDll`.
+### 6.3 Find the chain
 
-If the unload lands while the worker is inside the module, the next instruction fetch goes into unmapped memory.
+1. Search for UTF-16 `Crypt32.dll`. In 6.43 it is at RVA `0x30F888`.
+2. Xref it to `LoadLibraryW` or `LoadLibraryA`. The return value is stored in a global.
+3. Xref the certificate API name to `GetProcAddress`; that pointer goes to another global.
+4. Find indirect calls through that global.
+5. Find `FreeLibrary` calls that use the handle.
+6. Log `LoadLibrary`, `GetProcAddress`, `FreeLibrary`, and `LdrUnloadDll` with thread ids and stacks. `LdrUnloadDll` may be called below `FreeLibrary` or by a certificate path that manages the module itself.
 
-### 7.3 Find the chain
+### 6.4 Fix 1: remove the free
 
-1. Search for the UTF-16 string `Crypt32.dll`.
-2. Xref it to the `LoadLibraryW` or `LoadLibraryA` call. The return value is stored in a global.
-3. Search for `CertFindChainInStore` or `CertGetCertificateChain`.
-4. Xref it to `GetProcAddress`; the returned pointer is stored in a global.
-5. Find indirect calls through that global.
-6. Find `FreeLibrary` calls with the crypt32 handle. The handle may be loaded into a register or read from the global.
-7. Use API Monitor or Frida to log `LoadLibrary`, `GetProcAddress`, `FreeLibrary`, and `LdrUnloadDll` with thread IDs and stacks. `LdrUnloadDll` may be called below `FreeLibrary` or from a certificate path that manages the module itself.
-8. If the `Crypt32.dll` string is obfuscated, run an HTTPS download under API Monitor and log every `LoadLibrary` and `GetProcAddress` call. Crypt32 appears at the first certificate operation.
-
-### 7.4 Fix 1: remove the free
-
-NOP the `push` and the `FreeLibrary` call:
+In 6.43 the free is:
 
 ```text
-50 FF 15 C0 84 6D 00  ->  90 90 90 90 90 90 90
+50 FF 15 C0 84 6D 00  ->  90 90 90 90 90 90 90      file 0x478B1
 ```
 
-That is 7 bytes: `push eax` plus the 6-byte indirect call. The stack is unchanged because both the push and the call are removed together.
+Seven bytes: `push eax` plus the six-byte indirect call. The stack is unchanged because both are removed together. If the sequence differs, remove the whole argument setup and call; never leave a stray push.
 
-If the sequence is different, count the bytes and remove the whole argument setup and call. Do not leave a stray `push` on the stack.
+### 6.5 Fix 2: entry-point resident reference
 
-### 7.5 Fix 2: entry-point resident reference
+If several paths unload the module, hold one reference for the life of the process. Add a stub, make it the entry point, load the module, never free, then jump to the original entry.
 
-If the module has multiple unload paths, hold one reference forever. Add a stub and make it the entry point; the stub calls `LoadLibraryA("Crypt32.dll")` or `LoadLibraryW(L"Crypt32.dll")`, never frees the reference, and then jumps to the original entry.
-
-Generic stub shape:
+The 6.43 stub, 35 bytes at file `0x2D6A4C`, RVA `0x2D764C`:
 
 ```text
-60                       pushad
-68 <string_va>           push offset "Crypt32.dll"
-FF 15 <LoadLibraryW>     call dword ptr [LoadLibraryW]
-61                       popad
-E9 <original_entry>      jmp original_entry
+E8 00 00 00 00        call $+5
+58                    pop eax
+2D 51 76 2D 00        sub eax, 0x2D7651
+89 C3                 mov ebx, eax
+60                    pushad
+8D 83 88 F8 30 00     lea eax, [ebx+0x30F888]
+50                    push eax
+8B 93 EC 83 2D 00     mov edx, dword ptr [ebx+0x2D83EC]
+FF D2                 call edx
+61                    popad
+E9 7D D7 FA FF        jmp 0x284DEC
 ```
 
-`pushad` and `popad` preserve the registers the original entry expects. The `LoadLibraryW` call uses the stdcall convention and cleans its own argument. The stub does not need to check the return value; if the load fails, the original code will handle it. Match the API to the import table: use `LoadLibraryW` with a UTF-16 string if the build imports the wide version, or `LoadLibraryA` with an ANSI string if it imports the ANSI version. Do not mix the two.
+`AddressOfEntryPoint` at file `0x120` becomes `4C 76 2D 00`, RVA `0x2D764C`. The stub computes the image base from its own return address, so it survives ASLR. The jump returns to the original entry RVA `0x284DEC`.
 
-Place the stub in a code cave in the same section and set `AddressOfEntryPoint` to the stub's RVA. Leave the original entry intact, so the stub's final `jmp original_entry` lands on the original code, not on another jump. This is the 6.43 design.
+Two independent replacement checks:
 
-If you cannot change `AddressOfEntryPoint`, overwrite the entry point with `E9 <rel32>` to the stub, copy the stolen entry bytes into the stub, and end with `jmp entry + stolen_length`. In that design, do not jump to `entry`, because `entry` now contains the jump to the stub and you would loop.
+1. The `sub eax, imm32` immediate must equal the RVA of the instruction after `call $+5`. If it is off by one, the base is wrong and the load faults.
+2. The final `jmp rel32` must land on the original entry RVA in the pristine file, not on a jump thunk.
 
-### 7.6 Verify the module lifetime
+If you cannot change `AddressOfEntryPoint`, overwrite the entry with `E9 <rel32>` to the stub, copy the stolen bytes into the stub, and end with `jmp entry + stolen_length`. Never jump back to `entry`, which now contains the jump to the stub.
 
-- Launch the patched image from its install path.
-- Enumerate the 32-bit module list with Toolhelp32 (`TH32CS_SNAPMODULE32`), not a 64-bit PowerShell module read.
-- Confirm `crypt32.dll` is present before any download.
+### 6.6 Verify the module lifetime
+
+- Launch from the install path with `ExePath` matching.
+- Enumerate modules with a 32-bit Toolhelp32 loop (`TH32CS_SNAPMODULE32`). A 64-bit module read shows the WOW64 host and misses crypt32.
+- Confirm `crypt32.dll` before any download.
 - Perform an HTTPS download.
-- Confirm `crypt32.dll` is still present after the download and after a `LdrUnloadDll` event.
-- Close to the tray and sample at 60, 300, and 600 seconds, then at 40 minutes.
-- Confirm no WER `CRYPT32.dll_unloaded` record for the pid.
-
-A 32-bit Toolhelp32 loop, in C:
+- Confirm it is still present after the download and after any `LdrUnloadDll`.
+- Sample at 60, 300, and 600 seconds, then after 40 minutes in the tray.
+- Confirm no WER `CRYPT32.dll_unloaded` for the pid.
 
 ```c
 HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -691,110 +690,73 @@ MODULEENTRY32 me;
 me.dwSize = sizeof(me);
 BOOL found = FALSE;
 for (BOOL ok = Module32First(snap, &me); ok; ok = Module32Next(snap, &me)) {
-    if (_stricmp(me.szModule, "crypt32.dll") == 0) {
-        found = TRUE;
-        break;
-    }
+    if (_stricmp(me.szModule, "crypt32.dll") == 0) { found = TRUE; break; }
 }
 CloseHandle(snap);
 ```
 
-Compile and run the loop as a 32-bit process. A 64-bit Toolhelp32 read uses the 64-bit structure layout and does not see the WOW64 modules correctly.
+Compile and run that loop as a 32-bit process.
 
-## 8. Helper process
+### Gate 6
 
-`IDMGrHlp.exe` is a separate 32-bit MFC executable. `IDMan.exe` can launch it, and it can also be started directly. It shows the periodic fake-serial dialogs.
+- `crypt32.dll` present before and after an HTTPS download.
+- No WER `CRYPT32.dll_unloaded` for the pid.
+- Ten minute tray soak with no exit.
 
-### 8.1 Find the helper dialogs
+---
+
+## 7. Phase 7: helper
+
+`IDMGrHlp.exe` is a separate 32-bit MFC executable. `IDMan.exe` launches it, and it also starts directly. It shows the periodic fake-serial dialogs.
+
+### 7.1 Find the helper dialogs
 
 1. Open `IDMGrHlp.exe` in the disassembler.
-2. Find the `MessageBoxA` or `MessageBoxW` imports and xref every call site.
-3. Search for the fake-serial strings and xref them. The call sites that build those strings are the dialog sites.
-4. In 6.43, the two call sites are at file offsets `0x52A1` and `0x52C8`.
+2. Xref every `MessageBoxA` and `MessageBoxW` call.
+3. Find the call sites that build the fake-serial strings.
+4. In 6.43 the two call sites are at file `0x52A1` and `0x52C8`.
 
-If the helper uses a custom dialog resource instead of `MessageBox`, list its resources and apply the title-length cave from section 5.2 to the helper's dialog procedure.
+If the helper uses a custom dialog resource, apply the title or control check from phase 4.1 to its procedure.
 
-### 8.2 Patch the helper
+### 7.2 Patch the helper
 
-Each call site is a 6-byte indirect call:
+Each site is a six-byte indirect call:
 
 ```text
 FF 15 <IAT MessageBoxA>  ->  31 C0 90 90 90 90
 ```
 
-This skips the call and returns 0 in `EAX`. `MessageBoxA` is stdcall, so the call normally cleans its arguments. Removing the call also removes that cleanup. Inspect the instructions before the call:
+`MessageBoxA` is stdcall and normally cleans its arguments. Removing the call also removes the cleanup. If arguments are pushed immediately before the call, add `add esp, n` or use a `ret n` gadget. In 6.43 there are no pending arguments at either site.
 
-- If no arguments are pushed immediately before the call, the six-byte patch is safe. This is the case at the 6.43 sites.
-- If arguments are pushed immediately before the call, the patch leaves them on the stack. Add `add esp, n` after the patch, or replace the call with a `ret n` gadget that cleans the arguments and returns to the next instruction.
+A safer generic alternative is to patch the function that builds the dialog to `31 C0 C3` when several call sites share it.
 
-A safer generic alternative is to patch the function that builds the dialog, not the `MessageBox` call:
+### 7.3 Verify the helper
 
-```text
-31 C0 C3        xor eax, eax ; ret
-```
+- Run `IDMGrHlp.exe` directly. It exits 0 and shows no window.
+- Run IDMan long enough for the helper to start. No helper dialog appears.
 
-Use this when the same function is called from several places.
+### Gate 7
 
-### 8.3 Verify the helper
+- Helper exits 0 with no window.
+- No fake-serial dialog after 15 minutes of IDM uptime.
 
-- Start `IDMGrHlp.exe` directly.
-- It must exit with code 0.
-- No window, no fake-serial text.
-- Start IDM and let it run long enough for the helper to be launched. No helper dialog may appear.
+---
 
-If a new build merges the helper into `IDMan.exe`, apply the same patches to the `MessageBox` call sites in the main executable.
+## 8. Phase 8: build the artifact
 
-## 9. PE checksum
-
-The PE optional header checksum is at:
-
-```text
-file offset = e_lfanew + 4 + 20 + 0x40
-```
-
-For a standard PE32 header, that is file offset `0x150`. Compute it from `e_lfanew`, do not hardcode `0x150` in a tool that must work on other builds.
-
-The checksum algorithm:
-
-```python
-def pe_checksum(data, checksum_offset):
-    total = 0
-    for i in range(0, len(data), 2):
-        if checksum_offset <= i < checksum_offset + 4:
-            continue
-        word = data[i]
-        if i + 1 < len(data):
-            word |= data[i + 1] << 8
-        total += word
-        total = (total & 0xFFFF) + (total >> 16)
-    total = (total & 0xFFFF) + (total >> 16)
-    return (total + len(data)) & 0xFFFFFFFF
-```
-
-Recompute the checksum after every code patch, including the entry stub, the dialog cave, and the helper patches. Write the result last. The Windows loader does not normally verify the checksum for an executable, but IDM's own integrity check may compare it. A correct checksum removes one variable from the crash and dialog investigations.
-
-The generic patcher in section 10 recomputes the checksum automatically. If you patch by hand, run the function above and write the 4-byte little-endian result at the checksum field.
-
-## 10. Generic patcher and manifest
-
-The patcher is version-agnostic. It reads a JSON manifest, applies offset or pattern patches, verifies the original bytes, refuses overlaps, and recomputes the PE checksum.
-
-### 10.1 Manifest schema
+### 8.1 Manifest schema
 
 ```json
 {
+  "target": "Internet Download Manager 6.43 build 18, 32-bit IDMan.exe",
+  "pristine_sha256": "A705C0154FAFC7CD509DECF165CB6F6C050B6521B40ADB6F730DD827C86051C7",
+  "expected_sha256": "98D9E4085759E13836E3063C5E11FA75770A974582FA8890F39A290A83ECE260",
   "patches": [
     {
       "name": "serial_validator",
       "offset": "0x5A830",
       "original": "55 8B EC",
       "patch": "B0 01 C3"
-    },
-    {
-      "name": "crypt32_free",
-      "pattern": "50 FF 15 ?? ?? ?? ??",
-      "original": "50 FF 15 C0 84 6D 00",
-      "patch": "90 90 90 90 90 90 90"
     }
   ]
 }
@@ -802,212 +764,30 @@ The patcher is version-agnostic. It reads a JSON manifest, applies offset or pat
 
 Rules:
 
-- `offset` is a file offset, not a VA or RVA. Accepts `0x` hex or decimal.
-- `original` is optional for offset patches, but always include it. The patcher fails if the bytes do not match.
-- `pattern` is a byte pattern with `??` wildcards. It must match exactly once unless `allow_multiple` is true.
-- `patch` is the exact replacement bytes. The patcher does not pad; include every byte you want to write.
-- Patches must not overlap. The patcher fails on overlap, which catches a cave patch that accidentally covers a code site.
-- `expected_sha256` is optional. Use it for a local regression check, not as a hardcoded build identity.
+- `offset` is a file offset, never an RVA or VA.
+- Always include `original`. The patcher refuses a mismatch, which catches a wrong build.
+- `patch` is the complete replacement. The patcher does not pad, so include every byte you intend to write.
+- Patches must not overlap. Overlap usually means a cave range and a code site disagree about the same bytes.
+- `expected_sha256` is a local regression check. It is not a build identity across machines with different patch sets.
+- Do not list the checksum field. The patcher recomputes it.
 
-### 10.2 The patcher
+### 8.2 Apply the manifest
+
+```text
+python tooling/patch.py manifest/6.43b18.json pristine/IDMan.exe build/IDMan.exe
+```
+
+The tool prints every applied patch, the checksum, and the input and output hashes. `PASS` means the output matches `expected_sha256`.
+
+### 8.3 Generate a manifest from a diff
+
+1. Keep the pristine copy.
+2. Build the patched file by any means.
+3. Diff pristine against patched:
 
 ```python
-#!/usr/bin/env python3
-"""Apply a JSON patch manifest to a PE file and recompute the PE checksum."""
-
-import argparse
-import hashlib
-import json
-import struct
-import sys
-
-
-def hex_bytes(text):
-    return bytes.fromhex(text.replace(" ", ""))
-
-
-def parse_pattern(text):
-    data = []
-    mask = []
-    for token in text.split():
-        if token in ("??", "?"):
-            data.append(0)
-            mask.append(False)
-        else:
-            data.append(int(token, 16))
-            mask.append(True)
-    return bytes(data), mask
-
-
-def find_pattern(data, pattern, mask):
-    hits = []
-    n = len(pattern)
-    for i in range(0, len(data) - n + 1):
-        for j in range(n):
-            if mask[j] and data[i + j] != pattern[j]:
-                break
-        else:
-            hits.append(i)
-    return hits
-
-
-def pe_checksum(data, checksum_offset):
-    total = 0
-    for i in range(0, len(data), 2):
-        if checksum_offset <= i < checksum_offset + 4:
-            continue
-        word = data[i]
-        if i + 1 < len(data):
-            word |= data[i + 1] << 8
-        total += word
-        total = (total & 0xFFFF) + (total >> 16)
-    total = (total & 0xFFFF) + (total >> 16)
-    return (total + len(data)) & 0xFFFFFFFF
-
-
-def checksum_field(data):
-    e_lfanew = struct.unpack("<I", data[0x3C:0x40])[0]
-    return e_lfanew + 4 + 20 + 0x40
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("manifest")
-    ap.add_argument("input")
-    ap.add_argument("output")
-    ap.add_argument("--in-place", action="store_true")
-    args = ap.parse_args()
-
-    if args.output == args.input and not args.in_place:
-        print("refusing to overwrite the input without --in-place")
-        return 2
-
-    data = bytearray(open(args.input, "rb").read())
-    manifest = json.load(open(args.manifest))
-    patches = manifest.get("patches", [])
-
-    applied = []
-    occupied = []
-    for spec in patches:
-        name = spec.get("name", "patch")
-        patch = hex_bytes(spec["patch"])
-        if "offset" in spec:
-            offset = int(str(spec["offset"]), 0)
-            if "original" in spec:
-                original = hex_bytes(spec["original"])
-                got = bytes(data[offset:offset + len(original)])
-                if got != original:
-                    print("%s: original mismatch at 0x%X" % (name, offset))
-                    print("  expected %s" % original.hex(" "))
-                    print("  found    %s" % got.hex(" "))
-                    return 1
-        elif "pattern" in spec:
-            pattern, mask = parse_pattern(spec["pattern"])
-            hits = find_pattern(data, pattern, mask)
-            if len(hits) != 1 and not spec.get("allow_multiple"):
-                print("%s: pattern matched %d times, expected 1" % (name, len(hits)))
-                return 1
-            if not hits:
-                print("%s: pattern not found" % name)
-                return 1
-            offset = hits[0]
-            if "original" in spec:
-                original = hex_bytes(spec["original"])
-                got = bytes(data[offset:offset + len(original)])
-                if got != original:
-                    print("%s: matched bytes do not equal original" % name)
-                    return 1
-        else:
-            print("%s: needs offset or pattern" % name)
-            return 1
-
-        end = offset + len(patch)
-        if end > len(data):
-            print("%s: patch runs past end of file" % name)
-            return 1
-        for a, b in occupied:
-            if offset < b and a < end:
-                print("%s: overlaps another patch at 0x%X..0x%X" % (name, a, b))
-                return 1
-        data[offset:end] = patch
-        occupied.append((offset, end))
-        applied.append((name, offset, len(patch)))
-
-    chk = checksum_field(data)
-    value = pe_checksum(bytes(data), chk)
-    data[chk:chk + 4] = struct.pack("<I", value)
-
-    open(args.output, "wb").write(data)
-    print("%-32s %-10s %s" % ("patch", "offset", "bytes"))
-    for name, offset, length in applied:
-        print("%-32s 0x%08X %d" % (name, offset, length))
-    print("checksum 0x%08X at file 0x%X" % (value, chk))
-    print("input  sha256 %s" % hashlib.sha256(open(args.input, "rb").read()).hexdigest().upper())
-    print("output sha256 %s" % hashlib.sha256(data).hexdigest().upper())
-    expected = manifest.get("expected_sha256")
-    if expected and expected.upper() != hashlib.sha256(data).hexdigest().upper():
-        print("FAIL expected SHA256 %s" % expected.upper())
-        return 1
-    print("PASS")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-```
-
-### 10.3 Usage
-
-```text
-python patcher.py manifest.json IDMan.pristine.exe IDMan.patched.exe
-```
-
-The patcher prints every applied patch, the checksum, and the local input and output hashes. It does not modify the input unless you pass `--in-place`.
-
-### 10.4 Offset patches and pattern patches
-
-Use offset patches when you have identified the exact build and verified the original bytes. Use pattern patches when the build may have moved, or when you want the manifest to survive a minor update.
-
-Pattern design:
-
-- Include at least 8 to 16 bytes around the patch site.
-- Use `??` for relative offsets, absolute addresses, and register numbers that may change.
-- Prefer bytes from the instruction encoding that are stable across builds, not string or data bytes.
-- Test the pattern against the pristine file before patching. It must match once.
-- If a pattern matches multiple times, add context bytes until it is unique. Do not use `allow_multiple` for a code patch unless every match should be patched.
-
-Example pattern for the 6.43 crypt32 free:
-
-```text
-50 FF 15 C0 84 6D 00
-```
-
-The `C0 84 6D 00` is the IAT slot for `FreeLibrary`, which changes between builds. A version-agnostic pattern would wildcard it:
-
-```text
-50 FF 15 ?? ?? ?? ??
-```
-
-But that pattern is not unique by itself. Add the surrounding function bytes or use the cached handle load as context.
-
-### 10.5 Generate a manifest from a diff
-
-The reliable way to build a manifest for a known version:
-
-1. Keep a pristine copy.
-2. Patch one site at a time in a test copy, or build the full patched file.
-3. Diff the pristine and patched files.
-4. Group contiguous byte runs into patches.
-5. Exclude the checksum field at `0x150` or the computed checksum offset.
-6. Merge cave and entry-stub writes into one patch per cave.
-7. Add `original` bytes from the pristine file.
-8. Reapply the manifest to the pristine file with the patcher and compare the result to your hand-built file.
-
-A simple diff:
-
-```python
-a = open("IDMan.pristine.exe", "rb").read()
-b = open("IDMan.patched.exe", "rb").read()
+a = open("pristine/IDMan.exe", "rb").read()
+b = open("build/IDMan.exe", "rb").read()
 i = 0
 while i < len(a):
     if a[i] != b[i]:
@@ -1020,369 +800,323 @@ while i < len(a):
         i += 1
 ```
 
-The diff is a starting point, not a finished manifest. Merge adjacent runs, split a run if it mixes a code patch and a data patch, and add context for pattern matching.
+4. Group the runs into semantic patches. Merge fragments inside a cave into one cave patch; the diff splits them wherever the patched bytes happen to be zero.
+5. Exclude the checksum field.
+6. Re-apply the manifest to the pristine file and compare the output hash with the hand-built file. They must be identical.
 
-### 10.6 Test the manifest
+### 8.4 Checksum
 
-Always test on a copy:
+The checksum field is at `e_lfanew + 4 + 20 + 0x40`, which is file `0x150` for a standard PE32 header. Compute it from `e_lfanew`; do not hardcode `0x150` in a tool that must work on other builds.
 
-1. Apply the manifest to the pristine file.
-2. Compare the output to your hand-built patched file. They must be identical.
-3. Launch the output from a test directory, with `ExePath` set to that exact path.
-4. Run the verification matrix in section 13.
-5. Only then write the patched file to the install directory.
+```python
+def pe_checksum(data, checksum_offset):
+    total = 0
+    for i in range(0, len(data), 2):
+        if checksum_offset <= i < checksum_offset + 4:
+            continue
+        word = data[i]
+        if i + 1 < len(data):
+            word |= data[i + 1] << 8
+        total += word
+        total = (total & 0xFFFF) + (total >> 16)
+    total = (total & 0xFFFF) + (total >> 16)
+    return (total + len(data)) & 0xFFFFFFFF
+```
 
-If the output differs, the manifest is missing a patch, has an extra patch, or applied a patch at the wrong offset. Do not debug the live install; debug the manifest on the copy.
+The Windows loader does not normally verify the checksum, but IDM's self-check may. A correct checksum removes one variable from every later investigation.
 
-### 10.7 Install and launch
+### 8.5 Reproduce and compare
 
-1. Close `IDMan.exe` and `IDMGrHlp.exe`. Confirm no process remains.
-2. Back up the installed `IDMan.exe` and `IDMGrHlp.exe` outside the install directory.
-3. Write the patched `IDMan.exe` to the install directory with elevation.
-4. Write the patched `IDMGrHlp.exe` if you patched the helper.
-5. Set `HKCU\Software\DownloadManager\ExePath` to the exact install path, for example `C:\Program Files (x86)\Internet Download Manager\IDMan.exe`.
-6. Launch from that exact path.
-7. If the process exits in about 0.12 seconds with no window, the `ExePath` value does not match the launched image. Fix it before investigating anything else.
-8. Run the verification matrix in section 13.
+The manifest is only trustworthy when it reproduces the verified binary byte for byte:
 
-The `ExePath` check is a gate, not a license check. It compares the launched image path with the registry value. A mismatch produces a silent exit, which looks like a failed patch but is usually just the wrong path.
+```text
+python tooling/patch.py manifest/6.43b18.json pristine/IDMan.exe build/IDMan.exe
+```
 
-## 11. Version drift guide
+Expected for this repository's 6.43 build 18 manifest:
 
-Every layer has stable anchors and unstable offsets. The stable anchors are strings, API imports, registry names, serial format constants, dialog titles, and status codes. The unstable parts are addresses, register allocation, function order, and compiler-generated prologues.
+```text
+input  A705C0154FAFC7CD509DECF165CB6F6C050B6521B40ADB6F730DD827C86051C7
+output 98D9E4085759E13836E3063C5E11FA75770A974582FA8890F39A290A83ECE260
+PASS
+```
 
-| Layer | Stable anchors | 6.43 b18 example | How to re-find in a new build |
+If the output differs, the manifest is missing a patch, has an extra patch, or applied one at the wrong offset. Debug it on the copy, never on the live install.
+
+### Gate 8
+
+- Manifest applies cleanly to the pristine file.
+- Output hash equals the recorded verified hash for that build and patch set.
+- Checksum recomputed at the correct field.
+- No overlapping patches.
+
+---
+
+## 9. Phase 9: install and verify
+
+### 9.1 Install
+
+1. Kill every IDMan and IDMGrHlp process.
+2. Back up `IDMan.exe` and `IDMGrHlp.exe` outside the install directory.
+3. Write the patched files to the install directory. `Program Files` needs elevation.
+4. Set `ExePath` to the exact installed path.
+5. Set the autostart entry to the installed path, quoted:
+
+```powershell
+Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name IDMan `
+  -Value '"C:\Program Files (x86)\Internet Download Manager\IDMan.exe" /onboot'
+```
+
+An unquoted path with spaces fails at logon. A leftover autostart entry pointing at a workspace copy is a common reason the registration window returns after a reboot.
+
+6. Launch from the installed path. Do not double-click a copy in a temp directory.
+
+### 9.2 Verification matrix
+
+| Check | Pass condition |
+|---|---|
+| Hash | Installed file equals the manifest output hash |
+| Status | Phase 2 probe returns 0 |
+| About | Registered, no trial counter |
+| Registration menu | No window, no warning, no licensed-to |
+| Download | Only `Download File Info` and `Download complete` |
+| Buy page | No `buy2.html` or `buy_idm2.html` process |
+| Update | `LastCheckQU` does not change during a normal launch |
+| Tray | Close hides the window, tray icon remains, process alive |
+| Soak | Alive after 40 minutes in the tray |
+| Crypt32 | 32-bit module list contains `crypt32.dll` after HTTPS work |
+| WER | No `Application Error 1000` for the pid |
+| Helper | `IDMGrHlp.exe` exits 0 with no window |
+| Transfer | A submitted URL reaches IDM and downloads |
+
+`tooling/gate.ps1` automates the static checks, the launch, the tray check, and an optional transfer test:
+
+```powershell
+powershell -File tooling/gate.ps1 `
+  -Exe "C:\Program Files (x86)\Internet Download Manager\IDMan.exe" `
+  -AliveSeconds 20 -TraySeconds 15 `
+  -TransferUrl "https://example.com/file.zip"
+```
+
+### 9.3 Browser handoff
+
+The browser extension hands a URL to a running IDM. If IDM is not running, the handoff fails and the extension reports:
+
+```text
+Cannot transfer the download to IDM
+Error 0x80010108
+```
+
+`0x80010108` is `RPC_E_DISCONNECTED`: the COM automation server that the extension expects to talk to is gone. It is a symptom of IDM not running, not a browser problem. Fix the startup path. Do not reinstall the extension.
+
+Test the handoff without the browser:
+
+```text
+"C:\Program Files (x86)\Internet Download Manager\IDMan.exe" /d "https://example.com/file.zip"
+```
+
+With IDM running, this opens `Download File Info` against the running instance. With IDM stopped, it starts a new instance first. Both must work, because the extension uses the same entry point.
+
+### 9.4 Failure decision tree
+
+| Symptom | Most likely cause | Check |
+|---|---|---|
+| Exit in under 1 second, code 0 | Another IDMan is already running | `Get-Process IDMan` |
+| Exit in under 1 second, code 2 | `ExePath` mismatch, or the registration dialog was dismissed and the exit path ran | Compare `ExePath` with the launched path; probe for `EndDialog` then exit |
+| Registration window at startup | Status probe returns non-zero, usually 6 | Re-run phase 2, patch that code |
+| Fake-serial warning after a download | Warning function or call sites unpatched | Phase 4.2 |
+| Licensed-to dialog | Licensed-to call unpatched | Phase 4.3 |
+| Buy page opens | URL builder or `ShellExecute` unpatched | Phase 4.4 |
+| Update check runs | Check function or timer unpatched | Phase 4.5 |
+| Process exits in the tray after seconds or minutes | Unpatched timer or `PostQuitMessage`/`ExitProcess` site | Phase 5, then re-probe |
+| Crash after HTTPS | crypt32 free still present, or entry stub wrong | Phase 6 |
+| `CRYPT32.dll_unloaded` in WER | crypt32 not resident | Phase 6.4 or 6.5 |
+| Module list lacks crypt32 but the app works | 64-bit module read on a 32-bit process | Use 32-bit Toolhelp32 |
+| `0x80010108` in the browser | IDM is not running | Phase 9.3, fix startup |
+| Soak ends when a second IDMan starts | Single instance | Kill all before the soak |
+| Patcher reports overlap | Two patches cover the same bytes | Split or reorder |
+| Crash after a call patch | Stack cleanup wrong | Check cdecl vs stdcall, use a `ret n` gadget |
+
+---
+
+## 10. Phase 10: version drift
+
+Every layer has stable anchors and unstable offsets. Anchors are strings, imports, registry names, format constants, dialog titles, status codes, and call shapes. Unstable are addresses, register allocation, function order, and compiler prologues.
+
+| Layer | Stable anchor | 6.43 build 18 (file offsets) | Re-find method |
 |---|---|---|---|
-| Version and entry | File version, `idmvers`, PE header | `v6.43b18` | File properties, `pefile`, About dialog |
-| Serial validators | `Serial`, `FName`, `LName`, `Email`, length 23, hyphens at 5, 11, 17 | `0x5A4B0`, `0x5A830` | Xref the registry strings and the length constants |
-| Status dispatcher | Small status codes, jump table, UI strings | `0x450630`, switch `0x452535`, table `0x4534BC` | Find the caller of the validators and follow the switch |
-| Registration dialog | Title `Internet Download Manager Registration`, `DialogBoxParamW` | proc `0x651762` | Resource list, title xref, `DialogBoxParamW` call |
-| Warning | `fake Serial Number`, `counterfeit` | `0x474760`, call sites `0x93B5F`, `0x74E84` | Xref the string, patch the function or call |
-| Licensed-to | `This product is licensed to` | call `0x489FA6` | Xref the string and the formatter |
-| Buy page | `buy`, `buy2.html`, `buy_idm2.html`, `ShellExecute` | `0x7C1A0`, `0x7EA43` | Xref the URL strings and `ShellExecute` |
-| Update check | `LastCheckQU`, HTTP, timer | `0x55DD0` | Xref the registry value |
-| Timers | `SetTimer`, intervals `0x124F80`, `0x927C0`, `0x2BF20` | many | Enumerate `SetTimer` calls, inspect `WM_TIMER` cases |
-| Quit | `PostQuitMessage` IAT | four sites | Xref the IAT slot |
-| Exit | `ExitProcess` IAT | five sites | Xref the IAT slot |
-| Tray | `WM_CLOSE`, `ShowWindow` | `0x88C15`, cave `0x896F4` | Window proc `WM_CLOSE` case |
-| Crypt32 load | `Crypt32.dll`, `LoadLibrary`, `GetProcAddress` | `0x5EF4D2`, `0x5EF517` | Xref the string and the cert API names |
-| Crypt32 free | Cached handle, `FreeLibrary`, `LdrUnloadDll` | `0x4484B2` | Follow the handle global and API Monitor |
-| Helper | `IDMGrHlp.exe`, `MessageBoxA` | `0x52A1`, `0x52C8` | Xref the helper's MessageBox calls |
-| Checksum | PE optional header | `0x150` | `e_lfanew + 4 + 20 + 0x40` |
+| Version | File version, `idmvers` | `v6.43b18` | File resource plus registry |
+| Serial validators | `Serial`, length 23, hyphens at 5, 11, 17 | `0x5A4B0`, `0x5A830` | Xref the registry string and the length constants |
+| Status dispatcher | One caller at startup, returns small codes | `0x4FA30` body, codes at `0x50083`, `0x50C1C`, `0x50CFB`, `0x50D5C`, `0x50DBD` | Probe the return value, then locate the `mov eax, imm32` |
+| Registration dialog | Title `Internet Download Manager Registration` | proc `0x250B62`, cave `0x2D6A80` | Resource list, title xref, `DialogBoxParamW` |
+| Message wrapper | `IDM_emc_` caption, runtime decode | `0x6C9C0`, callers `0x74899` and others | Hook `MessageBoxW`, read the caller offset |
+| Warning | Return 0 suppresses the message | `0x73B60`, `0x93B5F`, `0x74E84` | Xref the wrapper callers |
+| Licensed-to | Formatted confirmation | `0x893A6` | Xref the formatter or the call |
+| Buy page | `buy`, `buy2.html`, `ShellExecute` | `0x7C1A0`, `0x7EA43`, `0x914DD` | Xref the URL and the shell call |
+| Update | `LastCheckQU` | `0x55DD0` | Xref the registry value |
+| Timers | `SetTimer`, interval immediates | `0x6C073`, `0x8DA76`, `0x76666` | Enumerate `SetTimer`, inspect `WM_TIMER` |
+| Quit | `PostQuitMessage` IAT | `0x14E902`, `0xB7E27`, `0xE21BE`, `0xE2647`, `0x25F5A0` | Xref the IAT slot |
+| Exit | `ExitProcess` IAT | `0x101D4`, `0x4D006`, `0x6640B`, `0x6C0CF`, `0x120D5C` | Xref the IAT slot |
+| Tray | `WM_CLOSE`, `ShowWindow` | `0x88C15`, cave `0x896F4` | Window procedure `WM_CLOSE` case |
+| Crypt32 | `Crypt32.dll`, cert APIs | load `0x30F888`, free `0x478B1`, stub `0x2D6A4C` | Xref the string and `FreeLibrary` |
+| Helper | `IDMGrHlp.exe`, `MessageBox` | `0x52A1`, `0x52C8` | Xref the helper dialogs |
+| Checksum | PE optional header | field `0x150` | `e_lfanew + 4 + 20 + 0x40` |
 
-### 11.1 What usually changes
+### 10.1 What usually changes
 
-- Addresses and offsets. Every build shifts code and data.
+- Every address and offset.
 - Function order and inlining. A validator may be inlined into its caller.
-- Register allocation. A cached handle may move from one register to another.
-- Dialog resource IDs and control order.
-- String addresses and occasional wording changes.
-- Timer IDs and intervals.
-- The compiler's prologue and epilogue.
+- Register allocation. A cached handle may move.
+- Dialog resource ids and control order.
+- String addresses and occasional wording.
+- Timer ids and intervals.
+- The compiler prologue and epilogue.
 
-### 11.2 If the binary is packed or protected
+### 10.2 If the binary is packed
 
-Check the section names, entropy, imports, and entry point. A packed binary has few imports, a writable and executable section, and a stub at the entry point. Unpack it before analysis:
+Check sections, entropy, imports, and entry point. A packed binary has few imports, a writable and executable section, and a stub at the entry. Unpack before analysis:
 
 1. Run it in a VM under a debugger.
-2. Break after the unpacking stub, when the original entry point is reached.
+2. Break after the unpacking stub reaches the original entry.
 3. Dump the process image with a PE dump tool.
 4. Rebuild the import table if needed.
 5. Verify the dumped image runs.
 
-IDM's standard builds are not packed, but a future build or a third-party repack may change that.
+IDM's standard builds are not packed. A third-party repack may change that.
 
-### 11.3 If the build is 64-bit
+### 10.3 If the build is 64-bit
 
-A 64-bit build changes the calling convention, the PE format (PE32+), the register set, and the module list. The same layer model applies, but the byte patterns and the cave code do not. Treat a 64-bit build as a new target:
+Treat it as a new target. The layer model holds; the byte patterns and cave code do not.
 
-- Use a 64-bit debugger and a 64-bit disassembler.
-- The first four arguments are in `RCX`, `RDX`, `R8`, `R9`; stack arguments start at `[rsp+0x28]`.
-- The dialog procedure arguments are in registers, not at `[ebp+0xC]`.
-- The entry stub must preserve the 64-bit calling convention and use `LoadLibraryW` from the 64-bit process.
-- The module list is native, so a 64-bit enumeration is correct.
+- 64-bit debugger and disassembler.
+- First four arguments in `RCX`, `RDX`, `R8`, `R9`; stack arguments start at `[rsp+0x28]`.
+- Dialog procedure arguments are in registers, not at `[ebp+0xC]`.
+- The entry stub must preserve the 64-bit convention and load the 64-bit module.
+- The module list is native, so 64-bit enumeration is correct.
 
-### 11.4 If the UI is rewritten
+### 10.4 If the UI is rewritten
 
-The dialog procedure may have a different title, different controls, or a new framework. Do not rely on the exact title length. Instead:
+Do not rely on the title length. Find the dialog by control text (`Serial`, `First Name`, `Last Name`, `Email`) or by the resource id used at the creation call. In the cave, use `GetDlgItem` with a known control id, or `GetWindowTextW` and a full compare.
 
-- Find the dialog by its control text (`Serial`, `First Name`, `Last Name`, `Email`) or by the resource ID used at the `DialogBoxParamW` call.
-- In the cave, use `GetDlgItem` to check for a known control ID, or `GetWindowTextW` to compare the full title.
-- If the dialog is created with `CreateDialogParamW` and shown with `ShowWindow`, patch the creation call or the `ShowWindow` call.
+### 10.5 If crypt32 is loaded differently
 
-### 11.5 If crypt32 is loaded differently
+The load may be delayed until the first HTTPS operation, or use `LoadLibraryExW` with flags. Log `LoadLibraryW`, `LoadLibraryExW`, `GetProcAddress`, `FreeLibrary`, and `LdrUnloadDll` with return values and stacks. If a delay-load helper loads it, patch the delay-load call or the free, not the visible `LoadLibrary`.
 
-The load may be delayed until the first HTTPS download, or it may use `LoadLibraryExW` with flags. Use API Monitor or Frida to log:
+### 10.6 If the helper is merged
 
-- `LoadLibraryW`, `LoadLibraryExW`, `GetProcAddress`, `FreeLibrary`, `LdrUnloadDll`.
-- The return values and the globals where they are stored.
-- The thread ID and stack at each unload.
+If `IDMGrHlp.exe` disappears and its dialogs move into `IDMan.exe`, search the main executable for the same call shapes and patch those sites with the same six-byte skip.
 
-If the module is loaded by a delay-load helper, patch the delay-load call or the free, not the visible `LoadLibrary` site.
+### 10.7 Validating a new build
 
-### 11.6 If the helper is merged
+1. Record version and baseline behavior.
+2. Probe the status code before patching.
+3. Patch one layer, then run that layer's gate.
+4. Build the manifest, reproduce the hash, then install.
+5. Run the full matrix, including a ten minute tray soak.
 
-If `IDMGrHlp.exe` disappears and the dialogs move into `IDMan.exe`, search the main executable for the same fake-serial strings and `MessageBox` calls. Patch those call sites with the same six-byte skip.
+---
 
-### 11.7 Validating a new build
+## Appendix A: verified 6.43 build 18 patch set
 
-1. Record the version and baseline behavior.
-2. Fill the anchor table in section 3.4.
-3. Patch one layer at a time on a copy.
-4. Run the layer's verification.
-5. Build a manifest and apply it to a fresh pristine copy.
-6. Compare the manifest output to your hand-built file.
-7. Run the full verification matrix in section 13.
-8. Only then install.
+`manifest/6.43b18.json` contains 38 patches. The code site list, by purpose:
 
-## 12. Worked example: 6.43 build 18
-
-The offsets below are a reference map for one exact build. They are not universal. On any other build, use section 11 to re-find each site.
-
-### 12.1 License and UI
-
-| Offset | Original | Patch | Purpose |
-|---:|---|---|---|
-| `0x4FFC4` | `74 15` | `EB 15` | Force the online registration branch to success |
-| `0x5A4B0` | `55 8B EC` | `B0 01 C3` | Name validator returns true |
-| `0x5A830` | `55 8B EC` | `B0 01 C3` | Serial validator returns true |
-| `0x50C1C` | `B8 03 00 00 00` | `B8 00 00 00 00` | Counterfeit status becomes registered |
-| `0x50083` | `B8 06 00 00 00` | `31 C0 90 90 90` | Trial-expired status becomes registered |
-| `0x93B5F` | `E8 FC FF FD FF` | `31 C0 90 90 90` | Skip the first fake-serial warning |
-| `0x74E84` | `E8 D7 EC FF FF` | `31 C0 90 90 90` | Skip the second fake-serial warning |
-| `0x55DD0` | `55 8B EC` | `33 C0 C3` | Disable the automatic update check |
-| `0x7C1A0` | `55` | `C3` | Disable the first buy-page URL builder |
-| `0x7EA43` | `E8 B8 7C 03 00` | `31 C0 90 90 90` | Skip the timer buy-page opener |
-| `0x863E9` | `0F 84 78 01 00 00` | `E9 79 01 00 00 90` | Force the timer's registered path |
-
-### 12.2 Tray and exit
-
-| Offset | Original | Patch | Purpose |
-|---:|---|---|---|
-| `0x914DD` | `FF 15 44 E5 7C 00` | `E8 A5 13 03 00 90` | Replace the timer `ShellExecuteA` call with a `ret 0x18` gadget |
-| `0x88C15` | `8B 75 08 8B C6` | `E9 DA 0A 00 00` | Redirect `WM_CLOSE` to the hide-to-tray cave |
-| `0x896F4` | `CC` x 34 | cave code | Hide the window and return 0 on `WM_CLOSE` |
-| `0x8DA76` | `68 10 27 00 00` | `68 FF FF FF 7F` | Disable the 10 second exit timer |
-| `0x6C073` | `8D 8E 20 4E 00 00 51` | `68 FF FF FF 7F 90 90` | Disable the 32 second exit timer |
-| `0x6C08C` | `75 41` | `90 90` | Remove the timer exit branch |
-| `0x6C09A` | `E8 B1 72 FB FF` | `83 C4 0C 90 90` | Skip the 12 second registration timer |
-| `0x101D4` | `FF 15 04 85 6D 00` | `E8 06 05 FF FF 90` | Neutralize the first stray `ExitProcess` call |
-| `0x4D006` | `FF 15 04 85 6D 00` | `E8 D4 36 FB FF 90` | Neutralize the second stray `ExitProcess` call |
-| `0x6640B` | `FF 15 04 85 6D 00` | `E8 CF A2 F9 FF 90` | Neutralize the third stray `ExitProcess` call |
-| `0x6C0CF` | `FF 15 04 85 6D 00` | `E8 0B 46 F9 FF 90` | Neutralize the fourth stray `ExitProcess` call |
-| `0x120D5C` | `FF 15 04 85 6D 00` | `E8 7E F9 ED FF 90` | Neutralize the fifth stray `ExitProcess` call |
-| `0x76665` | `68 20 BF 02 00` | `68 FF FF FF 7F` | Timer 21 arm A becomes INFINITE |
-| `0x8DA5C` | `68 20 BF 02 00` | `68 FF FF FF 7F` | Timer 21 arm B becomes INFINITE |
-| `0x14E902` | `FF 15 5C 86 6D 00` | `58 90 90 90 90 90` | Tray `WM_DESTROY`: no `WM_QUIT` |
-| `0xB7E27` | `FF 15 5C 86 6D 00` | `58 90 90 90 90 90` | Second `PostQuitMessage` site |
-| `0xE21BE` | `FF 15 5C 86 6D 00` | `58 90 90 90 90 90` | Third `PostQuitMessage` site |
-| `0xE2647` | `FF 15 5C 86 6D 00` | `58 90 90 90 90 90` | Fourth `PostQuitMessage` site |
-| `0x101DA` | `CC` | `C3` | `int3` after site 18 becomes `ret` |
-| `0x25F5A0` | `FF 25 5C 86 6D 00` | `C3 90 90 90 90 90` | Tail-jump thunk to `PostQuitMessage` becomes `ret` |
-
-The tray cave at `0x896F4`:
-
-```text
-8B 75 08 83 FE 10 74 0A 8B C6 83 E8 01 E9 17 F5 FF FF
-6A 00 FF 77 20 FF 15 DC 87 6D 00 E9 34 F5 FF FF
-```
-
-It checks for `WM_CLOSE`, calls `ShowWindow(hwnd, SW_HIDE)`, and returns 0 through the normal function epilogue.
-
-### 12.3 Crypt32 lifetime
-
-| Offset | Original | Patch | Purpose |
-|---:|---|---|---|
-| `0x478B1` | `50 FF 15 C0 84 6D 00` | `90 90 90 90 90 90 90` | Drop the `push` and `FreeLibrary` of the cached crypt32 handle |
-| `0x2D6A4C` | zero padding | 35-byte entry stub | Load crypt32 at the entry point and hold a reference |
-| `0x120` | original entry RVA | `4C 76 2D 00` | Point `AddressOfEntryPoint` at RVA `0x2D764C` |
-
-Entry stub, 35 bytes at file `0x2D6A4C`:
-
-```text
-E8 00 00 00 00 58 2D 51 76 2D 00 89 C3 60 8D 83 88 F8 30 00
-50 8B 93 EC 83 2D 00 FF D2 61 E9 7D D7 FA FF
-```
-
-The stub calls `LoadLibraryW(L"Crypt32.dll")` through the cached IAT pointer, preserves registers with `pushad` and `popad`, and jumps back to the original entry. The string at RVA `0x30F888` is UTF-16, and the IAT slot at RVA `0x2D83EC` is `LoadLibraryW`.
-
-### 12.4 Inside dialog suppression
-
-| Offset | Original | Patch | Purpose |
-|---:|---|---|---|
-| `0x250B62` | `8B FF 55 8B EC` | `E9 19 5F 08 00` | Dialog procedure jumps to the cave |
-| `0x2D6A80` | zero padding | 79-byte cave | Close the title length 38 registration dialog |
-| `0x73B60` | `6A FF 68 88 78 6A` | `31 C0 C3 88 78 6A` | Warning function returns 0 |
-| `0x893A6` | `E8 F5 24 06 00` | `31 C0 90 90 90` | Skip the licensed-to confirmation |
-| `0xA7F86` | `FF 15 68 86 6D 00` | `31 C0 90 90 90 90` | Skip the custom dialog wrapper |
-
-Dialog cave, 79 bytes at file `0x2D6A80`:
-
-```text
-8B FF
-55
-8B EC
-81 7D 0C 10 01 00 00
-0F 85 D5 A0 F7 FF
-60
-E8 00 00 00 00
-5B
-81 EB 98 76 2D 00
-8B 75 08
-56
-8B 83 E4 87 2D 00
-FF D0
-83 F8 26
-75 19
-6A 00
-6A 00
-6A 10
-56
-8B 83 E8 87 2D 00
-FF D0
-61
-B8 01 00 00 00
-5D
-C2 10 00
-61
-E9 98 A0 F7 FF
-```
-
-The cave uses the IAT slots at RVA `0x2D87E4` (`GetWindowTextLengthW`) and `0x2D87E8` (`PostMessageA`).
-
-### 12.5 Helper
-
-| Offset | Original | Patch | Purpose |
-|---:|---|---|---|
-| `0x52A1` | `FF 15 BC 34 44 00` | `31 C0 90 90 90 90` | Suppress the short fake-serial dialog |
-| `0x52C8` | `FF 15 BC 34 44 00` | `31 C0 90 90 90 90` | Suppress the long fake-serial dialog |
-
-### 12.6 Checksum
-
-Recompute the PE checksum at file `0x150` after all code patches. The generic patcher in section 10 does this automatically.
-
-### 12.7 Patch order
-
-The table is a patch map, not a ready-made manifest. Create one manifest entry per row. If a row combines adjacent diff runs, either write the full original and patch bytes for the row, or split it at the changed bytes. Verify each original byte before applying.
-
-1. Apply the code patches to the copy.
-2. Apply the entry stub and the dialog cave.
-3. Recompute the checksum.
-4. Write the file to the install directory with elevation.
-5. Set `ExePath` to the exact install path.
-6. Launch and run the verification matrix.
-
-## 13. Verification matrix and failure modes
-
-### 13.1 Verification matrix
-
-| Check | Pass condition |
+| Group | Patches |
 |---|---|
-| Registry | `idmvers` is `Full`, `ExePath` names the launched image |
-| About | Registered state, no trial counter |
-| Registration menu | No registration window, no warning, no licensed-to |
-| Download | Only the normal `Download File Info` and `Download complete` windows |
-| Buy page | No `buy2.html` or `buy_idm2.html` process |
-| Update | `LastCheckQU` does not change during a normal launch |
-| Tray | Close hides the window, the tray icon remains, the process stays alive |
-| Crypt32 | 32-bit module list contains `crypt32.dll` before and after an HTTPS download |
-| Soak | Process alive after 40 minutes in the tray |
-| WER | No Application Error 1000 with `CRYPT32.dll_unloaded` for the pid |
-| Helper | `IDMGrHlp.exe` exits 0 and shows no window |
-| Checksum | Stored PE checksum equals the computed value |
-| Manifest | Applying the manifest to a fresh pristine copy produces the same file |
+| Entry | `entry_point_rva`, `entry_stub` |
+| Status | `status_counterfeit`, `status_trial_expired`, `online_registration_branch`, `timer_registered_path` |
+| Validators | `name_validator`, `serial_validator` |
+| UI | `registration_dialog_proc`, `dialog_cave`, `warning_function`, `fake_serial_warning_1`, `fake_serial_warning_2`, `licensed_to_call`, `dialog_wrapper_call` |
+| Buy and update | `buy_page_builder`, `buy_page_timer`, `buy_page_shellexec`, `update_check` |
+| Lifecycle | `exitprocess_1` to `exitprocess_5`, `postquit_site_2` to `postquit_site_4`, `postquit_tray_destroy`, `postquit_thunk`, `exit_timer_10s`, `exit_timer_32s`, `exit_timer_branch`, `registration_timer_12s`, `timer21_arm_a`, `timer21_arm_b`, `wm_close_redirect`, `tray_cave` |
+| Crypt32 | `crypt32_free` |
 
-### 13.2 Failure modes
+Hashes:
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| Process exits in about 0.12 seconds with no window | `ExePath` does not match the launched image | Set `ExePath` to the exact launched path |
-| About shows `Trial` with the full build | The status stub forces 0, or the serial is blacklisted | Restore the status function, suppress the UI, use a random serial |
-| Registration window appears at startup, then the 15-day warning and exit | The status machine returns 6 (trial expired); only the counterfeit return was patched | Patch the `mov eax, 6` immediate (section 4.4), keep the UI suppression patches |
-| Registration window still appears | The dialog procedure cave is missing or the title length is wrong | Recheck the proc jump, the cave, and the title length |
-| Fake-serial warning still appears | The warning function or call site is unpatched | Patch the function or both call sites |
-| Licensed-to dialog still appears | The licensed-to call is unpatched | Patch the call or the formatter |
-| Buy page opens | The URL builder or `ShellExecute` call is unpatched | Patch the builder or the call |
-| Update check runs | The check function or timer is unpatched | Patch the shared check function |
-| Crash after an HTTPS download | The crypt32 free is still present, or the entry stub is missing | Recheck section 7 |
-| WER `CRYPT32.dll_unloaded` | `crypt32.dll` is not resident | Apply the free removal or the entry stub |
-| Module list says crypt32 is absent but the process works | A 64-bit module read on a 32-bit process | Use a 32-bit Toolhelp32 enumerator |
-| Soak ends when a second IDMan starts | The single-instance mutex and `ExePath` gate | Kill every IDMan before a soak |
-| Installed file is write protected | Program Files ACL | Use an elevated process |
-| Patcher reports overlap | Two patches cover the same bytes | Split or reorder the manifest |
-| Crash after a call patch | Stack cleanup is wrong | Check cdecl vs stdcall, use a `ret n` gadget or `pop` |
-| Helper dialog appears | The helper `MessageBox` calls are unpatched | Patch both helper sites |
+```text
+pristine  A705C0154FAFC7CD509DECF165CB6F6C050B6521B40ADB6F730DD827C86051C7
+output    98D9E4085759E13836E3063C5E11FA75770A974582FA8890F39A290A83ECE260
+checksum  0x00645141 at file 0x150
+size      6,517,616 bytes
+```
 
-## 14. Operational notes
+The helper `IDMGrHlp.exe` for the same build:
 
-- Keep a pristine copy of every build you work on.
-- Keep the patch manifest next to the build. The manifest is the reproducible artifact.
-- Record the local input and output hashes in your notes. Hashes are for your own regression checks, not a substitute for a manifest.
-- Work in a VM snapshot. A bad patch can corrupt the registry or the install.
-- Re-run the discovery workflow after every update. An update replaces `IDMan.exe` and `IDMGrHlp.exe`.
-- If the app updates itself, the installed patched file is replaced. Reapply the manifest and recompute the checksum.
-- Do not distribute patched binaries. Distribute the method and the manifest if you share the work.
+```text
+file offsets 0x52A1, 0x52C8   FF 15 <MessageBoxA>  ->  31 C0 90 90 90 90
+sha256       F5E7360A0C376247507218AC92392BD8B71AF703...
+```
 
-## Appendix A: API and byte-pattern index
+Verify the helper hash against your own pristine copy; the manifest does not cover it because the helper changes independently of `IDMan.exe`.
 
-| Target | Pattern or API | Notes |
+## Appendix B: tooling
+
+| File | Use |
+|---|---|
+| `tooling/patch.py` | Apply a manifest, recompute the checksum, verify `expected_sha256` |
+| `tooling/hook-status.py` | Spawn under Frida, log the status code, dialogs, exits |
+| `tooling/hook-status.js` | The Frida probe body, editable for extra hooks |
+| `tooling/gate.ps1` | Static manifest check plus launch, tray, WER, optional transfer |
+| `manifest/6.43b18.json` | The verified 38-patch manifest |
+
+## Appendix C: byte and API index
+
+| Target | Pattern | Notes |
 |---|---|---|
 | Function prologue | `55 8B EC` or `8B FF 55 8B EC` | MSVC x86 |
-| Return false | `31 C0 C3` | `xor eax,eax; ret` |
-| Return true (AL) | `B0 01 C3` | `mov al,1; ret` |
-| Return true (EAX) | `31 C0 FF C0 C3` | `xor eax,eax; inc eax; ret` |
-| Skip a call, return 0 | `31 C0 90 90 90 90` | 6-byte indirect call |
-| Remove a push and call | `90` x 7 | 1-byte push plus 6-byte call |
-| `PostQuitMessage` call | `FF 15 <IAT>` | Preceded by `push 0` |
-| `PostQuitMessage` jump | `FF 25 <IAT>` | Patch to `C3 90 90 90 90 90` |
-| `ExitProcess` call | `FF 15 <IAT>` | Patch to a `ret` gadget |
-| `LoadLibraryW` call | `FF 15 <IAT>` | Stdcall, one argument |
-| `GetProcAddress` call | `FF 15 <IAT>` | Stdcall, two arguments |
-| `FreeLibrary` call | `FF 15 <IAT>` | Stdcall, one argument |
-| `DialogBoxParamW` call | `FF 15 <IAT>` or `E8` | Proc pointer is an argument |
-| `MessageBoxW` call | `FF 15 <IAT>` | 6-byte indirect call |
-| `SetTimer` call | `FF 15 <IAT>` | Interval is a `push` immediate |
+| Return false | `31 C0 C3` | `xor eax, eax ; ret` |
+| Return true in AL | `B0 01 C3` | `mov al, 1 ; ret` |
+| Return true in EAX | `31 C0 FF C0 C3` | `xor eax, eax ; inc eax ; ret` |
+| Skip a six-byte indirect call | `31 C0 90 90 90 90` | Returns 0 |
+| Remove a push and call | `90` x 7 | Push plus six-byte call |
+| `PostQuitMessage` call | `FF 15 <IAT>` | Patch `58 90 90 90 90 90` |
+| `PostQuitMessage` jump | `FF 25 <IAT>` | Patch `C3 90 90 90 90 90` |
+| `ExitProcess` call | `FF 15 <IAT>` | Patch to a `ret n` gadget |
+| `LoadLibraryW` | `FF 15 <IAT>` | Stdcall, one argument |
+| `GetProcAddress` | `FF 15 <IAT>` | Stdcall, two arguments |
+| `FreeLibrary` | `FF 15 <IAT>` | Stdcall, one argument |
 | 20 minute timer | `68 80 4F 12 00` | 1,200,000 ms |
 | 10 minute timer | `68 C0 27 09 00` | 600,000 ms |
 | 3 minute timer | `68 20 BF 02 00` | 180,000 ms |
 | 32 second timer | `68 00 7D 00 00` | 32,000 ms |
 | 12 second timer | `68 E0 2E 00 00` | 12,000 ms |
 | 10 second timer | `68 10 27 00 00` | 10,000 ms |
+| INFINITE interval | `68 FF FF FF 7F` | Replacement for any exit interval |
 | Serial length | `83 F8 17` or `3D 17 00 00 00` | 23 decimal |
 | Hyphen check | `80 78 05 2D` | `cmp byte ptr [eax+5], '-'` |
 
-## Appendix B: discovery worksheet
+## Appendix D: discovery worksheet
 
-Copy this JSON and fill it before patching. Every empty field is a discovery task.
+Copy and fill before patching:
 
 ```json
 {
-  "target": {
-    "file": "IDMan.exe",
-    "version": "",
-    "architecture": "PE32",
-    "entry_point": "",
-    "notes": ""
+  "build": {
+    "file_version": "",
+    "idmvers": "",
+    "idman_sha256": "",
+    "size": 0
   },
-  "anchors": {
-    "serial_validator_1": {"offset": "", "pattern": "", "confidence": ""},
-    "serial_validator_2": {"offset": "", "pattern": "", "confidence": ""},
-    "status_function": {"offset": "", "pattern": "", "confidence": ""},
-    "status_switch": {"offset": "", "pattern": "", "confidence": ""},
-    "registration_proc": {"offset": "", "pattern": "", "confidence": ""},
-    "warning_function": {"offset": "", "pattern": "", "confidence": ""},
-    "licensed_to_call": {"offset": "", "pattern": "", "confidence": ""},
-    "buy_page_call": {"offset": "", "pattern": "", "confidence": ""},
-    "update_check": {"offset": "", "pattern": "", "confidence": ""},
-    "post_quit_sites": [],
-    "exit_process_sites": [],
-    "tray_close": {"offset": "", "pattern": "", "confidence": ""},
-    "crypt32_load": {"offset": "", "pattern": "", "confidence": ""},
-    "crypt32_free": {"offset": "", "pattern": "", "confidence": ""},
-    "helper_dialogs": []
+  "runtime": {
+    "status_dispatcher_rva": "",
+    "status_code": null,
+    "status_evidence": "",
+    "message_wrapper_rva": "",
+    "dialog_proc_rva": "",
+    "exit_sites": [],
+    "postquit_sites": [],
+    "crypt32_free_site": ""
   },
-  "patches": []
+  "patches": {
+    "status_sites": [],
+    "ui_sites": [],
+    "lifecycle_sites": [],
+    "crypt32_sites": []
+  },
+  "verification": {
+    "gate_log": "",
+    "output_sha256": "",
+    "soak_minutes": 0,
+    "transfer_ok": false
+  }
 }
 ```
-
-The worksheet is the handoff artifact. Another agent should be able to read it, apply the manifest, and reproduce the build without repeating the discovery.

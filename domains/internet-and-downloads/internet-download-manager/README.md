@@ -4,50 +4,82 @@ Domain: `internet-and-downloads`
 
 Target: Internet Download Manager 6.x, 32-bit native builds. The worked example is 6.43 build 18.
 
-This is a method, not a fixed patch list. The playbook explains how to find and patch the license checks, registration UI, exit paths, crypt32 lifetime, and helper dialogs in any build. The offsets in the worked example are a reference for one build, not a contract for the next one.
+This folder is an executable runbook for an agent, not a fixed patch list. The playbook explains how to find the decision each layer makes, how to confirm the decision at runtime, how to patch it, and how to prove the result. The manifest and tools are the reference implementation for 6.43 build 18.
 
 ## What is included
 
-| File | Purpose |
+| Path | Purpose |
 |---|---|
-| `playbook.md` | Full discovery and patch workflow, generic patcher, version drift guide, verification matrix |
-| `README.md` | Entry point and layer summary |
+| `playbook.md` | Phase-based runbook: recon, license, UI, lifecycle, crypt32, helper, build, verify, drift |
+| `manifest/6.43b18.json` | 38 verified patches with original and patch bytes, and the expected output hash |
+| `tooling/patch.py` | Applies a manifest, verifies original bytes and overlaps, recomputes the PE checksum, checks `expected_sha256` |
+| `tooling/hook-status.py` | Spawns IDMan under Frida and reports the live status code, dialogs, and exit calls |
+| `tooling/hook-status.js` | The Frida probe body, editable for extra hooks |
+| `tooling/gate.ps1` | Static manifest check plus launch, tray, WER, and optional transfer tests |
+
+## Quick start
+
+```text
+# 1. Probe the build you have. Read the status code before patching.
+python tooling/hook-status.py "<pristine>\IDMan.exe" --seconds 8
+
+# 2. Apply the manifest for this exact build.
+python tooling/patch.py manifest/6.43b18.json "<pristine>\IDMan.exe" "<build>\IDMan.exe"
+
+# 3. Static and dynamic acceptance on the build copy.
+powershell -File tooling/gate.ps1 -Exe "<build>\IDMan.exe" -AliveSeconds 20 -TraySeconds 15
+
+# 4. Install, then run the gate against the installed file.
+powershell -File tooling/gate.ps1 -Exe "C:\Program Files (x86)\Internet Download Manager\IDMan.exe"
+```
 
 ## Read this first
 
-1. Work on a copy in a VM. Keep a pristine backup of `IDMan.exe` and `IDMGrHlp.exe`.
-2. Identify the version from the file resource, the `idmvers` registry value, and the About dialog.
-3. Follow the layer discovery in the playbook. Do not start by copying offsets.
-4. Record every patch in a JSON manifest with the original bytes and the patch bytes.
-5. Build with the generic patcher in playbook section 10. It applies offset or pattern patches and recomputes the PE checksum.
-6. Run the verification matrix in playbook section 13. A build is not done until every applicable check passes.
+1. Keep a pristine `IDMan.exe` and `IDMGrHlp.exe`, plus a registry export of `HKCU\Software\DownloadManager`.
+2. Probe the status dispatcher at runtime. A build that passes a static byte check can still return 6 (trial expired) and open the registration window.
+3. Fix the status machine before the UI. Dismissing the registration dialog while the status is non-zero produces a silent exit with code 2.
+4. Run only one IDMan at a time. A second instance exits in a fraction of a second and looks like a broken patch.
+5. Verify on a copy with `ExePath` set to that copy, then install.
+6. A build is done when the verification matrix passes, including the tray soak and the browser transfer test.
 
 ## Layers
 
 | Layer | What to do |
 |---|---|
-| Registry | Set `Serial`, `FName`, `LName`, `Email`, `idmvers`, and `ExePath`. Use a random synthetic serial. |
+| Registry | Set `Serial`, `FName`, `LName`, `Email`, `ExePath`. Use a synthetic serial that matches the 23-character format. |
 | Validators | Make the name and serial validators return true. |
-| Status | Force the registered path, or leave the status function alone and suppress the UI. |
-| Registration UI | Redirect the registration dialog procedure to a cave that closes the title-length 38 dialog. |
-| Warning and licensed-to | Patch the warning function and skip the licensed-to call. |
+| Status | Read the live code, then patch the `mov eax, imm32` for each non-zero code the machine returns. |
+| Registration UI | Redirect the registration dialog procedure to a cave that closes only that dialog. |
+| Warning and licensed-to | Patch the warning function and the licensed-to call. |
 | Buy page and update | Patch the URL builder, the `ShellExecute` call, and the update check. |
-| Lifecycle | Disable the quit and exit paths, and hide the window on `WM_CLOSE`. |
-| Crypt32 | Remove the unload of the cached crypt32 handle, or hold a reference at the entry point. |
+| Lifecycle | Raise the exit timers to INFINITE, neutralize `PostQuitMessage` and `ExitProcess`, hide on `WM_CLOSE`. |
+| Crypt32 | Remove the free, or hold a reference at the entry point. |
 | Helper | Skip the `MessageBox` calls in `IDMGrHlp.exe`. |
 | Checksum | Recompute the PE checksum after every code patch. |
 
+## Verified reference build
+
+```text
+IDMan.exe 6.43 build 18, 6,517,616 bytes
+pristine  A705C0154FAFC7CD509DECF165CB6F6C050B6521B40ADB6F730DD827C86051C7
+output    98D9E4085759E13836E3063C5E11FA75770A974582FA8890F39A290A83ECE260
+checksum  0x00645141 at file 0x150
+```
+
+The manifest reproduces the output hash from the pristine file exactly. That comparison is the acceptance test for the manifest itself.
+
+## Browser transfer
+
+If the browser reports `Cannot transfer the download to IDM`, `Error 0x80010108`, IDM is not running. `0x80010108` is `RPC_E_DISCONNECTED`: the extension's automation server is gone. Fix the IDM startup path, not the extension. Test with:
+
+```text
+IDMan.exe /d "https://example.com/file.zip"
+```
+
 ## Version drift
 
-Playbook section 11 lists the stable anchors for each layer and the method to re-find it after an update. The short version:
-
-- Offsets move. Strings, imports, registry names, serial format constants, dialog titles, and status codes stay useful.
-- Start from the string or the API call, not from the old address.
-- Patch one layer at a time on a copy, then build a manifest.
-- Re-run the full verification after every update.
-
-Playbook section 12 is a reference map for 6.43 build 18 only. Use it when you have confirmed that exact build.
+Offsets move. Strings, imports, registry names, serial format constants, dialog titles, status codes, and call shapes stay useful. Start from the anchor, confirm the decision at runtime, patch one layer, run that layer's gate. Rebuild the manifest by diffing pristine against the patched file, then reproduce the output hash before installing.
 
 ## Distribution
 
-This repository ships the method and the patcher, not a patched binary. Do not commit a patched `IDMan.exe`, a keygen, or a compiled patcher.
+This repository ships the method, the manifest, and the tools, not a patched binary. Do not commit a patched `IDMan.exe`, a keygen, or a compiled patcher.
