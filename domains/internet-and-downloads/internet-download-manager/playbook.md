@@ -301,7 +301,12 @@ The status dispatcher calls the validators and returns a code. In 6.43 the codes
 | 1 | Counterfeit warning |
 | 2 | Blocked serial details |
 | 3 | Exiting |
+| 6 | Trial expired: registration dialog at startup, then the "not been registered for 15 days" warning and exit |
+| 7 | Empty or unreadable serial |
 | 10 | Serial used on another computer |
+| 12 | Blocked serial |
+
+Codes 6, 7, and 12 were read from the dispatcher at runtime, not from the source. Confirm each code with an `onLeave` hook on the dispatcher return value before patching it: the day counter that drives code 6 is state, so a build that returns 3 on one machine can return 6 on another with the same binary.
 
 The caller switches on the status through a jump table:
 
@@ -335,6 +340,14 @@ B8 03 00 00 00  ->  B8 00 00 00 00
 ```
 
 This changes only the counterfeit return, not the whole status function.
+
+The same treatment applies to every non-zero return that the machine can produce. Patch the immediate at the `mov eax, imm32` that feeds the shared epilogue, not the caller. In the 6.43 build the trial-expired return is:
+
+```text
+B8 06 00 00 00  ->  31 C0 90 90 90
+```
+
+Patch only the code the running build actually returns. A binary that passes a static byte check can still show the registration dialog if the machine returns 6 and only 3 was patched. Hook the dispatcher, read the value, patch that value.
 
 ### 4.5 Verify the license layer
 
@@ -1134,6 +1147,7 @@ The offsets below are a reference map for one exact build. They are not universa
 | `0x5A4B0` | `55 8B EC` | `B0 01 C3` | Name validator returns true |
 | `0x5A830` | `55 8B EC` | `B0 01 C3` | Serial validator returns true |
 | `0x50C1C` | `B8 03 00 00 00` | `B8 00 00 00 00` | Counterfeit status becomes registered |
+| `0x50083` | `B8 06 00 00 00` | `31 C0 90 90 90` | Trial-expired status becomes registered |
 | `0x93B5F` | `E8 FC FF FD FF` | `31 C0 90 90 90` | Skip the first fake-serial warning |
 | `0x74E84` | `E8 D7 EC FF FF` | `31 C0 90 90 90` | Skip the second fake-serial warning |
 | `0x55DD0` | `55 8B EC` | `33 C0 C3` | Disable the automatic update check |
@@ -1284,6 +1298,7 @@ The table is a patch map, not a ready-made manifest. Create one manifest entry p
 |---|---|---|
 | Process exits in about 0.12 seconds with no window | `ExePath` does not match the launched image | Set `ExePath` to the exact launched path |
 | About shows `Trial` with the full build | The status stub forces 0, or the serial is blacklisted | Restore the status function, suppress the UI, use a random serial |
+| Registration window appears at startup, then the 15-day warning and exit | The status machine returns 6 (trial expired); only the counterfeit return was patched | Patch the `mov eax, 6` immediate (section 4.4), keep the UI suppression patches |
 | Registration window still appears | The dialog procedure cave is missing or the title length is wrong | Recheck the proc jump, the cave, and the title length |
 | Fake-serial warning still appears | The warning function or call site is unpatched | Patch the function or both call sites |
 | Licensed-to dialog still appears | The licensed-to call is unpatched | Patch the call or the formatter |
