@@ -4,7 +4,7 @@ Domain: `internet-and-downloads`
 
 Target: Internet Download Manager 6.43 build 18, 32-bit native build.
 
-Status: registered state, warning suppression, buy-page suppression, update-check suppression, helper-dialog suppression, and the crypt32 module unload crash fix. The complete build is the 39-site build in playbook sections 14 and 15.
+Status: registered state, warning suppression, buy-page suppression, update-check suppression, helper-dialog suppression, the crypt32 module unload crash fix, and inside dialog suppression. The complete build is the inside build in playbook sections 14, 15 and 16.
 
 This project is a guide only. It ships no patched binary, no keygen, and no compiled patcher. Build the patched file locally from the playbook if you need it.
 
@@ -22,17 +22,17 @@ This project is a guide only. It ships no patched binary, no keygen, and no comp
 3. Apply the byte patches in the playbook to IDMan.exe and IDMGrHlp.exe.
 4. Apply site 37 at file `0x478B1` (7 NOPs).
 5. Apply site 38: write the 35-byte resident stub at file `0x2D6A4C` and set `AddressOfEntryPoint` to RVA `0x2D764C`.
-6. Apply site 39: write `31 C0 C3` at file `0x4FA30`.
-7. Recompute the PE `CheckSum` and write it at file `0x150` (site 31). Do this after every code patch.
-8. Create the four registry values under `HKCU\Software\DownloadManager`.
+6. Apply the section 15 patches: site 40 dialog procedure jump at `0x250B62`, the 79-byte cave at `0x2D6A80`, site 41 warning function at `0x73B60`, site 42 licensed-to call at `0x893A6`, and site 43 dialog wrapper call at `0xA7F86`.
+7. Recompute the PE `CheckSum` and write it at file `0x150`. Do this after every code patch.
+8. Create the four registry values under `HKCU\Software\DownloadManager`. Use a random 5-5-5-5 serial, not `12345-67890-12345-67890`.
 9. Start IDM and confirm `idmvers` changes from `v6.43b18 Trial` to `v6.43b18 Full`.
 10. Confirm `Crypt32.dll` is in the 32-bit module list immediately after launch.
-11. Open the Registration dialog. It must appear without the counterfeit warning. Close it with Cancel.
-12. Add a download and confirm that no counterfeit dialog and no fake-serial warning appear.
+11. Open the Registration dialog. No registration window, no fake-serial warning, and no licensed-to message may appear.
+12. Add a download and confirm that only the standard `Download File Info` and `Download complete` windows appear.
 13. Confirm that no buy page opens and that `LastCheckQU` does not change.
 14. Leave IDM in the tray for 25 minutes. The process must stay alive, `Crypt32.dll` must stay in the module list, and no damaged-file dialog may appear.
 
-The authoritative build path is the complete script in playbook section 16. It reproduces the installed 39-site file byte for byte from the pristine binary and verifies SHA256 `599B15C25C1B9F06DCC4049B88E332AA105BBC0C382423F86BEC0D15F2224085`.
+The authoritative build path is the complete script in playbook section 16. It reproduces the installed inside file byte for byte from the pristine binary and verifies SHA256 `199E459FCC1D4ECDFDF3649C8E708FEE5EEC07CA22BD5AA9C253077B11F3BC6D`.
 
 ## Patch summary
 
@@ -52,10 +52,16 @@ All offsets are file offsets for the named binary. The helper offsets are for `I
 | `0x863E9` | `0F 84 78 01 00 00` | `E9 79 01 00 00 90` | Force the timer's registered path to stop the exit |
 | `0x478B1` | `50 FF 15 C0 84 6D 00` | `90 90 90 90 90 90 90` | Site 37: drop the destructor `FreeLibrary` of the cached crypt32 handle |
 | `0x2D6A4C` | zero padding | 35-byte stub (playbook 14.12) | Site 38: load `Crypt32.dll` at the entry point and hold the reference |
-| `0x4FA30` | `55 8D AC` | `31 C0 C3` | Site 39: registration status function returns 0 |
-| `0x150` | `C4 55 64 00` | `A8 1E 64 00` | PE `CheckSum` for the complete build, recomputed after all patches |
+| `0x250B62` | `8B FF 55 8B EC` | `E9 19 5F 08 00` | Site 40: dialog procedure jumps to the cave |
+| `0x2D6A80` | zero padding | 79-byte cave (playbook 15.1) | Site 40 cave: close the title length 38 registration dialog |
+| `0x73B60` | `6A FF 68 88 78 6A` | `31 C0 C3 88 78 6A` | Site 41: warning function returns 0 |
+| `0x893A6` | `E8 F5 24 06 00` | `31 C0 90 90 90` | Site 42: skip the licensed-to confirmation |
+| `0xA7F86` | `FF 15 68 86 6D 00` | `31 C0 90 90 90 90` | Site 43: skip the custom dialog wrapper |
+| `0x150` | `C4 55 64 00` | `F7 B6 63 00` | PE `CheckSum` for the complete build, recomputed after all patches |
 
-Site 37 alone is not enough. IDM loads `Crypt32.dll` at `0x5EF4D2`, caches the handle at `[0x7D2064]`, and calls `CertFindChainInStore` through the cached pointer at `0x5EF517`. The destructor free at `0x4484B2` is one unload source, but the certificate path also calls `LdrUnloadDll` on the crypt32 base from KERNELBASE. When the last reference goes, the process dies with `0xc0000005` in `CRYPT32.dll_unloaded` at offset `0x5d220`. Site 38 loads crypt32 at the entry point and never frees it, so one reference survives every unload and the cached pointer stays valid. Site 39 makes the registration status function return 0, so the counterfeit warning and the "IDM is exiting..." path never fire.
+Site 37 alone is not enough. IDM loads `Crypt32.dll` at `0x5EF4D2`, caches the handle at `[0x7D2064]`, and calls `CertFindChainInStore` through the cached pointer at `0x5EF517`. The destructor free at `0x4484B2` is one unload source, but the certificate path also calls `LdrUnloadDll` on the crypt32 base from KERNELBASE. When the last reference goes, the process dies with `0xc0000005` in `CRYPT32.dll_unloaded` at offset `0x5d220`. Site 38 loads crypt32 at the entry point and never frees it, so one reference survives every unload and the cached pointer stays valid. The section 15 patches suppress the registration UI directly: the dialog procedure stub closes the title length 38 registration window, the warning function returns 0, and the licensed-to and wrapper calls are skipped. The status function at `0x4FA30` remains original.
+
+The old site 39 status stub at `0x4FA30` (`31 C0 C3`) is obsolete. It forces the display to Trial and does not stop the download-time licensed-to dialog. Do not apply it; the inside build keeps `55 8D AC` at that offset.
 
 The `0x150` row is site 31. It is header hygiene, not the crash fix: a 31-site build with a correct checksum still died at `crypt32+0x5D220`. The value must be recomputed for any other patch order or build; see playbook section 14.
 
@@ -118,13 +124,13 @@ It checks for `WM_CLOSE`, calls `ShowWindow(hwnd, SW_HIDE)`, and returns 0 throu
 Create these values under `HKCU\Software\DownloadManager`:
 
 ```text
-Serial  REG_SZ  12345-67890-12345-67890
+Serial  REG_SZ  A7K2M-9Q4XZ-3V8NB-6T1WP
 FName   REG_SZ  Test
 LName   REG_SZ  User
 Email   REG_SZ  test@example.com
 ```
 
-The serial must be 23 characters with hyphens at positions 5, 11, and 17, for example `XXXXX-XXXXX-XXXXX-XXXXX`. Use a synthetic value, not a leaked key.
+The serial must be 23 characters with hyphens at positions 5, 11, and 17, for example `XXXXX-XXXXX-XXXXX-XXXXX`. Use a synthetic value, not a leaked key. Do not use `12345-67890-12345-67890`; it is blacklisted and triggers the licensed-to path even with the section 15 patches.
 
 ## Reference build
 
@@ -133,7 +139,9 @@ size            6,517,616 bytes
 pristine SHA256 A705C0154FAFC7CD509DECF165CB6F6C050B6521B40ADB6F730DD827C86051C7
 30-site SHA256  0D822AB317069F4B460A6B8333A26B56C8E527E080077212FB3E0209BD6CD395
 37-site SHA256  3A63B29E905C24C823F19F25D27405B468FFC8092AD9C84BC8A4B1E4DC16D2B7
-complete SHA256 599B15C25C1B9F06DCC4049B88E332AA105BBC0C382423F86BEC0D15F2224085
+38-site SHA256  64BF39DD3BDD568389C84CF3546B4007B2B97775F728E485F670DFCBBF720DA0
+39-site SHA256  599B15C25C1B9F06DCC4049B88E332AA105BBC0C382423F86BEC0D15F2224085 (superseded)
+inside SHA256   199E459FCC1D4ECDFDF3649C8E708FEE5EEC07CA22BD5AA9C253077B11F3BC6D
 
 IDMGrHlp.exe
 size            519,992 bytes
@@ -141,7 +149,7 @@ pristine SHA256 B3B6281EA820EAE8192E50B30698CF4C3B8BC3D4376C978403BC9E18E5857C23
 patched SHA256  F5E7360A0C376247507218AC92392BD8B71AF70376E3BF1058C77AFED575B36D
 ```
 
-The 30-site hash is `IDMan.exe` with the base set, the tray and exit overlay, and the residual quit and timer overlay. It still dies after 20 to 25 minutes because of the crypt32 module unload race in playbook section 14. The 37-site hash adds site 37 and still crashes because the certificate path unloads crypt32. The complete 39-site hash adds the entry-point resident stub (site 38) and the registration status stub (site 39). The intermediate 22-site build is `BACF3DCC44073935FD72493A2578F0A7295FE2F447A9DCF68EC0C4CD3774A020`. The helper hash is for `IDMGrHlp.exe` with the two dialog patches. A different patch order or a new build produces a different hash.
+The 30-site hash is `IDMan.exe` with the base set, the tray and exit overlay, and the residual quit and timer overlay. It still dies after 20 to 25 minutes because of the crypt32 module unload race in playbook section 14. The 37-site hash adds site 37 and still crashes because the certificate path unloads crypt32. The 38-site hash adds the entry-point resident stub (site 38). The 39-site hash adds the obsolete registration status stub (site 39) and is superseded. The inside hash adds the section 15 dialog patches and is the current build, with PE `CheckSum` `0x0063B6F7`. The intermediate 22-site build is `BACF3DCC44073935FD72493A2578F0A7295FE2F447A9DCF68EC0C4CD3774A020`. The helper hash is for `IDMGrHlp.exe` with the two dialog patches. A different patch order or a new build produces a different hash.
 
 ## Updates
 
