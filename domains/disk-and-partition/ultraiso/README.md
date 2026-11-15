@@ -4,7 +4,7 @@ Domain: `disk-and-partition`
 
 Target: UltraISO Premium 9.7.6.3829 (EZB Systems), PE32 x86, `UltraISO.exe`, 5,543,368 bytes.
 
-Status: desktop verified on Windows 11 x64, with and without licence values in the registry.
+Status: desktop verified on Windows 11 x64, with and without licence values in the registry. Applied to the installed copy on 2026-11-15; the clean start observed on that install is recorded in section 12 of the playbook.
 
 ## The result
 

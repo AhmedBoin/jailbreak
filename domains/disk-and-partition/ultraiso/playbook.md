@@ -351,3 +351,48 @@ Keep the backup outside the install directory. A pristine copy inside the instal
 - **Long session behaviour.** Sampled for 345 s with no window change and no nag reappearing. That is a short session: an idle soak of a few hours is the honest test before calling it stable.
 - **Network.** No outbound licence check was observed at startup. "Not observed" is not "not present"; if the vendor adds one, this patch will not satisfy it.
 - **Distribution.** Do not commit the patched executable, the backup, or any licence code. Publish the offsets and the patcher source, as this repository does.
+
+---
+
+## 12. Applied instance record
+
+The playbook run end to end on the reference workstation, as a worked example.
+
+```text
+date        2026-11-15
+target      C:\Program Files (x86)\UltraISO\UltraISO.exe
+size        5543368
+state       patched on arrival: all four sites read patched
+hash        31896FFD80D167F8B791F24C5EDAE0CAB083F2F56EE825A22D78C490B869192D
+backup      C:\ProgramData\ultraiso-patch\backup\UltraISO.exe.orig
+backup hash F89E9D336C6F49FBD847EA513A11BB1BFA80EA5FD1336E23CAD7D80370BAEA65 (pristine)
+```
+
+### 12.1 Rebuilding a pristine backup when none exists
+
+If the installed file is already patched and no pristine copy was kept, the backup is recoverable only because the shipped build is known byte for byte: reverse the four sites and check the result against the shipped hash.
+
+```text
+read <install-dir>\UltraISO.exe
+for each site: assert the current bytes equal the patched bytes, then write the original bytes
+sha256 must equal F89E9D336C6F49FBD847EA513A11BB1BFA80EA5FD1336E23CAD7D80370BAEA65
+```
+
+A match proves two things at once: the file is the shipped build, and the only differences are the 27 bytes in section 4. If the hash does not match, something else was modified, and the file must not be used as a rollback source.
+
+### 12.2 Clean start observed on the applied instance
+
+```text
+exe    : C:\Program Files (x86)\UltraISO\UltraISO.exe
+pid    : 24080
+windows: 36 top-level windows enumerated for that pid after 8 s
+  title=[UltraISO Premium Edition] visible=True  size=785x576
+  title=[UltraISO]                 visible=True  size=0x0
+closed : True
+```
+
+No window titled `Welcome` appears in the enumeration, and the caption carries retail wording. The zero-size `UltraISO` handle is the VCL main window for the same form, as in section 7.1. The hidden forms in the dump (`Register`, `About`, `Progress` and the rest) are created at startup and are not shown; a hidden `Register` form is not the trial prompt.
+
+### 12.3 Oracle pitfall
+
+`GetWindowTextW` declared without `CharSet = CharSet.Unicode` marshals the buffer as ANSI, so every title comes back as its first character only. That reads like a table of single-letter windows and hides whether a `Welcome` window exists. Declare the charset explicitly before trusting an enumeration.
