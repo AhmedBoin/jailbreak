@@ -1,0 +1,6 @@
+# Local build output and lab copies
+dist/
+*.orig
+*.exe
+*.tmp
+backup/
