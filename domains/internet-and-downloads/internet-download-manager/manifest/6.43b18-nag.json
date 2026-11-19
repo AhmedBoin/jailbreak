@@ -1,0 +1,21 @@
+{
+  "target": "IDMan.exe 6.43 build 18, addendum: suppress the trial nag HTML window",
+  "applies_to_sha256": "98D9E4085759E13836E3063C5E11FA75770A974582FA8890F39A290A83ECE260",
+  "expected_sha256": "65398CC64E5E2D87C3D54B5141A6EB3720F3302E29B7766CC800CFDC3B6966BC",
+  "notes": [
+    "Apply this manifest to the output of 6.43b18.json, not to the pristine file.",
+    "The nag window is the HTML resource type 23 id 113 page ('You have %d days left').",
+    "It is shown by a worker thread whose procedure starts at file 0x73A10 (RVA 0x74610).",
+    "The function is a cdecl thread procedure (its own epilogue is a bare ret), so a bare ret stub keeps the stack balanced.",
+    "Overwriting 55 8B EC with 31 C0 C3 makes the thread return 0 before it builds the dialog.",
+    "The checksum field at file 0x150 is recomputed by the patcher and is not listed as a patch."
+  ],
+  "patches": [
+    {
+      "name": "trial_nag_thread",
+      "offset": "0x73A10",
+      "original": "55 8B EC",
+      "patch": "31 C0 C3"
+    }
+  ]
+}

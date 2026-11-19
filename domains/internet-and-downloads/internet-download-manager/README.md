@@ -12,10 +12,12 @@ This folder is an executable runbook for an agent, not a fixed patch list. The p
 |---|---|
 | `playbook.md` | Phase-based runbook: recon, license, UI, lifecycle, crypt32, helper, build, verify, drift |
 | `manifest/6.43b18.json` | 38 verified patches with original and patch bytes, and the expected output hash |
+| `manifest/6.43b18-nag.json` | Addendum that stubs the trial nag page thread (section 4.6) |
 | `tooling/patch.py` | Applies a manifest, verifies original bytes and overlaps, recomputes the PE checksum, checks `expected_sha256` |
 | `tooling/hook-status.py` | Spawns IDMan under Frida and reports the live status code, dialogs, and exit calls |
 | `tooling/hook-status.js` | The Frida probe body, editable for extra hooks |
 | `tooling/gate.ps1` | Static manifest check plus launch, tray, WER, and optional transfer tests |
+| `tooling/nag-probe.py` | Spawns IDM under Frida and logs windows, classes, registry reads and shell calls |
 
 ## Quick start
 
@@ -26,11 +28,14 @@ python tooling/hook-status.py "<pristine>\IDMan.exe" --seconds 8
 # 2. Apply the manifest for this exact build.
 python tooling/patch.py manifest/6.43b18.json "<pristine>\IDMan.exe" "<build>\IDMan.exe"
 
+# 2b. Apply the nag addendum to the manifest output.
+python tooling/patch.py manifest/6.43b18-nag.json "<build>\IDMan.exe" "<build>\IDMan.nag.exe"
+
 # 3. Static and dynamic acceptance on the build copy.
-powershell -File tooling/gate.ps1 -Exe "<build>\IDMan.exe" -AliveSeconds 20 -TraySeconds 15
+powershell -File tooling/gate.ps1 -Exe "<build>\IDMan.nag.exe" -Manifest manifest/6.43b18-nag.json -AliveSeconds 20 -TraySeconds 15
 
 # 4. Install, then run the gate against the installed file.
-powershell -File tooling/gate.ps1 -Exe "C:\Program Files (x86)\Internet Download Manager\IDMan.exe"
+powershell -File tooling/gate.ps1 -Exe "C:\Program Files (x86)\Internet Download Manager\IDMan.exe" -Manifest manifest/6.43b18-nag.json
 ```
 
 ## Read this first
@@ -41,6 +46,7 @@ powershell -File tooling/gate.ps1 -Exe "C:\Program Files (x86)\Internet Download
 4. Run only one IDMan at a time. A second instance exits in a fraction of a second and looks like a broken patch.
 5. Verify on a copy with `ExePath` set to that copy, then install.
 6. A build is done when the verification matrix passes, including the tray soak and the browser transfer test.
+7. The `You have N days left` page is a separate worker thread, not a message box. If it appears after a passing gate, the nag addendum was not applied (section 4.6).
 
 ## Layers
 
@@ -51,6 +57,7 @@ powershell -File tooling/gate.ps1 -Exe "C:\Program Files (x86)\Internet Download
 | Status | Read the live code, then patch the `mov eax, imm32` for each non-zero code the machine returns. |
 | Registration UI | Redirect the registration dialog procedure to a cave that closes only that dialog. |
 | Warning and licensed-to | Patch the warning function and the licensed-to call. |
+| Trial nag page | Stub the HTML page thread at `0x73A10` (section 4.6). |
 | Buy page and update | Patch the URL builder, the `ShellExecute` call, and the update check. |
 | Lifecycle | Raise the exit timers to INFINITE, neutralize `PostQuitMessage` and `ExitProcess`, hide on `WM_CLOSE`. |
 | Crypt32 | Remove the free, or hold a reference at the entry point. |
@@ -64,6 +71,13 @@ IDMan.exe 6.43 build 18, 6,517,616 bytes
 pristine  A705C0154FAFC7CD509DECF165CB6F6C050B6521B40ADB6F730DD827C86051C7
 output    98D9E4085759E13836E3063C5E11FA75770A974582FA8890F39A290A83ECE260
 checksum  0x00645141 at file 0x150
+```
+
+With the nag addendum (`6.43b18-nag.json`):
+
+```text
+output    65398CC64E5E2D87C3D54B5141A6EB3720F3302E29B7766CC800CFDC3B6966BC
+checksum  0x006385F5 at file 0x150
 ```
 
 The manifest reproduces the output hash from the pristine file exactly. That comparison is the acceptance test for the manifest itself.

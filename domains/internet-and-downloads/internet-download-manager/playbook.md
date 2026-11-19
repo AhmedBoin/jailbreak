@@ -21,11 +21,13 @@ For a 6.x build, a finished crack has four artifacts:
 | Manifest JSON | Every byte changed, with original and patch values |
 | Gate log | The output of `tooling/gate.ps1`, stored with the manifest |
 
+A patch that cannot be expressed against the pristine image ships as a second manifest that names its input hash in `applies_to_sha256` (see `manifest/6.43b18-nag.json`). Chain it after the main manifest, and keep both hashes in the gate log.
+
 Never ship only the binary. The manifest is what makes the work reproducible and is the only defense against the next build silently breaking a patch.
 
 ### 0.2 Layer model
 
-IDM has eight decision layers. Treat each as a separate problem with its own gate.
+IDM has nine decision layers. Treat each as a separate problem with its own gate.
 
 | Layer | What it decides | Failure symptom if wrong |
 |---|---|---|
@@ -33,6 +35,7 @@ IDM has eight decision layers. Treat each as a separate problem with its own gat
 | Validators | Whether the serial and name are syntactically acceptable | Registration or fake-serial dialog |
 | Status machine | Registered, trial, counterfeit, expired, blocked | Registration dialog, 15-day warning, exit with code 2 |
 | UI | Registration, warning, licensed-to, buy page, update | Any of those windows |
+| Trial nag page | Whether the HTML reminder thread runs | A borderless page with `You have N days left`, usually once a day |
 | Lifecycle | Timers, tray close, `PostQuitMessage`, `ExitProcess` | Process disappears while idle or when the window is closed |
 | Module lifetime | `crypt32.dll` load, use, unload | Crash with `CRYPT32.dll_unloaded` after HTTPS work |
 | Helper | Periodic fake-serial dialogs from `IDMGrHlp.exe` | A second window appears minutes after launch |
@@ -46,6 +49,8 @@ IDM has eight decision layers. Treat each as a separate problem with its own gat
 4. Recompute the checksum last, after every code patch, including caves.
 5. Test on a copy with `ExePath` pointed at the copy. Only write to `Program Files` after the gate passes.
 6. Kill every IDMan process before any launch test. IDM is single instance, and a second copy exits in a fraction of a second, which looks exactly like a broken patch.
+7. Stub the trial nag thread after the status machine, not before. With the status still non-zero, you cannot tell the nag page from a status dialog, and both mean different patches.
+8. Patch the nag thread procedure, never the page resource. The same page serves the reminder and the expiry variants, so editing markup hides one message and leaves the window.
 
 ### 0.4 Workspace layout
 
@@ -55,7 +60,8 @@ IDM has eight decision layers. Treat each as a separate problem with its own gat
   pristine/IDMGrHlp.exe       original helper
   build/IDMan.exe             manifest output
   build/IDMGrHlp.exe
-  manifest/6.43b18.json       patch list
+  manifest/6.43b18.json       patch list, pristine to output
+  manifest/6.43b18-nag.json   addendum, output to nag-free output
   logs/                       gate output, hook output, WER queries
   export/                     registry export before changes
 ```
@@ -455,6 +461,51 @@ The 6.43 site is file `0x893A6`. If the call takes pushed arguments, clean them.
 - If `LastCheckQU` is absent in a new build, log WinInet or WinHttp calls during startup and patch the timer that performs the request.
 - `Help -> Check for updates` may be a separate manual path. Patch the shared check, not just the timer.
 
+### 4.6 Trial nag HTML window
+
+IDM also shows a borderless HTML page with `You have N days left to use Internet Download Manager` and the price cards. It is neither a dialog template nor a message box. In 6.43 it is resource type 23 (`RT_HTML`) id 113, 16,969 bytes at file `0x3D2BB8`.
+
+Recognise it:
+
+```text
+python tooling/sscan.py "<exe>" "days left"
+python tooling/resources.py "<exe>"
+```
+
+The page carries the element ids `daysLeftText`, `daysSumTable`, and `close_dlg`, and the window itself has no caption, so a title search finds nothing. The native class fills those elements after the page is parsed.
+
+Trace the show path backwards:
+
+1. The class constructor at file `0x131960` (RVA `0x132560`) stores the day count at `[this+0x120]`, sets the vtables `0x708E0C` and `0x708DDC`, and creates the host window with `push 0x71` (113) and `push 0x1F8` (the page id and window kind).
+2. Its only caller is the thread procedure at file `0x73A10` (RVA `0x74610`). It reads the day count, constructs the page object on the stack at `[ebp-0x144]`, then calls `0x251E83` to show it.
+3. That procedure is passed to MFC `AfxBeginThread` at file `0x93B8E`: `push 0` times four, `push param`, `push 0x474610`, `call <AfxBeginThread wrapper at 0x65B617>`. No direct `call` site exists, so a call-graph search misses it. Look for the function pointer instead:
+
+```text
+python tooling/refs.py "<exe>" 0x474610
+```
+
+Patch the thread procedure, not the dialog. It is cdecl (its own epilogue is a bare `ret`), so a three-byte stub is ABI-correct:
+
+```text
+file 0x73A10   55 8B EC  ->  31 C0 C3      ; return 0 before building the page
+```
+
+This covers every path that spawns the nag, including the daily reminder at expiry, and does not touch the registration dialog or the buy-page code. Apply it as an addendum on top of the 38-patch output:
+
+```text
+python tooling/patch.py manifest/6.43b18-nag.json "<build>\IDMan.exe" "<build>\IDMan.nag.exe"
+```
+
+Do not call the thread procedure directly to test it. Without MFC module state it crashes the process; that is a harness limitation, not a patch failure. Verify instead with `gate.ps1 -Manifest manifest\6.43b18-nag.json` (no dialogs, alive, tray, WER clean) and with `tooling/nag-probe.py`, which logs every `CreateWindowEx` and registered class: the nag window never appears.
+
+For this build:
+
+```text
+input  98D9E4085759E13836E3063C5E11FA75770A974582FA8890F39A290A83ECE260
+output 65398CC64E5E2D87C3D54B5141A6EB3720F3302E29B7766CC800CFDC3B6966BC
+checksum 0x006385F5 at file 0x150
+```
+
 ### Gate 4
 
 - Registration menu: no window, no warning, no licensed-to.
@@ -462,6 +513,7 @@ The 6.43 site is file `0x893A6`. If the call takes pushed arguments, clean them.
 - Download: only `Download File Info` and `Download complete`.
 - No browser process opened with `buy2.html` or `buy_idm2.html`.
 - `LastCheckQU` does not change during a normal launch.
+- No window whose content is `You have N days left`, on launch and after a test transfer. The nag thread stub from 4.6 is in place, and the static gate lists `trial_nag_thread`.
 
 ---
 
@@ -880,6 +932,7 @@ An unquoted path with spaces fails at logon. A leftover autostart entry pointing
 | About | Registered, no trial counter |
 | Registration menu | No window, no warning, no licensed-to |
 | Download | Only `Download File Info` and `Download complete` |
+| Trial nag | No `You have N days left` page on launch or after a transfer; `trial_nag_thread` site present |
 | Buy page | No `buy2.html` or `buy_idm2.html` process |
 | Update | `LastCheckQU` does not change during a normal launch |
 | Tray | Close hides the window, tray icon remains, process alive |
@@ -928,6 +981,8 @@ With IDM running, this opens `Download File Info` against the running instance. 
 | Licensed-to dialog | Licensed-to call unpatched | Phase 4.3 |
 | Buy page opens | URL builder or `ShellExecute` unpatched | Phase 4.4 |
 | Update check runs | Check function or timer unpatched | Phase 4.5 |
+| `You have N days left` page appears | Nag thread procedure not stubbed | Phase 4.6, site `0x73A10` |
+| Nag page still appears after the stub | Running instance predates the file replacement, or a second manifest was not applied | Restart IDM, re-check the sha and `trial_nag_thread` in the gate |
 | Process exits in the tray after seconds or minutes | Unpatched timer or `PostQuitMessage`/`ExitProcess` site | Phase 5, then re-probe |
 | Crash after HTTPS | crypt32 free still present, or entry stub wrong | Phase 6 |
 | `CRYPT32.dll_unloaded` in WER | crypt32 not resident | Phase 6.4 or 6.5 |
@@ -960,6 +1015,7 @@ Every layer has stable anchors and unstable offsets. Anchors are strings, import
 | Tray | `WM_CLOSE`, `ShowWindow` | `0x88C15`, cave `0x896F4` | Window procedure `WM_CLOSE` case |
 | Crypt32 | `Crypt32.dll`, cert APIs | load `0x30F888`, free `0x478B1`, stub `0x2D6A4C` | Xref the string and `FreeLibrary` |
 | Helper | `IDMGrHlp.exe`, `MessageBox` | `0x52A1`, `0x52C8` | Xref the helper dialogs |
+| Trial nag | `RT_HTML` id 113, `daysLeftText` | resource `0x3D2BB8`, ctor `0x131960`, thread `0x73A10` | `resources.py`, then xref the page id and the thread pointer |
 | Checksum | PE optional header | field `0x150` | `e_lfanew + 4 + 20 + 0x40` |
 
 ### 10.1 What usually changes
@@ -970,6 +1026,7 @@ Every layer has stable anchors and unstable offsets. Anchors are strings, import
 - Dialog resource ids and control order.
 - String addresses and occasional wording.
 - Timer ids and intervals.
+- The trial nag page resource id and the thread procedure that hosts it.
 - The compiler prologue and epilogue.
 
 ### 10.2 If the binary is packed
@@ -1012,7 +1069,7 @@ If `IDMGrHlp.exe` disappears and its dialogs move into `IDMan.exe`, search the m
 2. Probe the status code before patching.
 3. Patch one layer, then run that layer's gate.
 4. Build the manifest, reproduce the hash, then install.
-5. Run the full matrix, including a ten minute tray soak.
+5. Run the full matrix, including a ten minute tray soak and one launch after a test transfer.
 
 ---
 
@@ -1039,6 +1096,20 @@ checksum  0x00645141 at file 0x150
 size      6,517,616 bytes
 ```
 
+### Trial nag addendum, section 4.6
+
+`manifest/6.43b18-nag.json` chains from the 38-patch output and stubs the nag thread procedure:
+
+| Patch | Offset | Original | Patch |
+|---|---|---|---|
+| `trial_nag_thread` | `0x73A10` | `55 8B EC` | `31 C0 C3` |
+
+```text
+input     98D9E4085759E13836E3063C5E11FA75770A974582FA8890F39A290A83ECE260
+output    65398CC64E5E2D87C3D54B5141A6EB3720F3302E29B7766CC800CFDC3B6966BC
+checksum  0x006385F5 at file 0x150
+```
+
 The helper `IDMGrHlp.exe` for the same build:
 
 ```text
@@ -1057,6 +1128,13 @@ Verify the helper hash against your own pristine copy; the manifest does not cov
 | `tooling/hook-status.js` | The Frida probe body, editable for extra hooks |
 | `tooling/gate.ps1` | Static manifest check plus launch, tray, WER, optional transfer |
 | `manifest/6.43b18.json` | The verified 38-patch manifest |
+| `manifest/6.43b18-nag.json` | Addendum: stub the trial nag thread (section 4.6) |
+| `tooling/nag-probe.py`, `tooling/nag-probe.js` | Spawn under Frida, log windows, classes, registry, shell calls |
+| `tooling/nag-call.py`, `tooling/nag-call.js` | Attempt to force the nag page on demand; documents the MFC-state dead end |
+| `tooling/sscan.py` | ASCII/byte search with file offsets |
+| `tooling/resources.py` | List PE resources as type/name plus file offset and size |
+| `tooling/strrefs.py` | Find code references to a string by file offset |
+| `tooling/iatcall.py` | Show the arguments around every call to a named import |
 
 ## Appendix C: byte and API index
 
@@ -1083,6 +1161,8 @@ Verify the helper hash against your own pristine copy; the manifest does not cov
 | INFINITE interval | `68 FF FF FF 7F` | Replacement for any exit interval |
 | Serial length | `83 F8 17` or `3D 17 00 00 00` | 23 decimal |
 | Hyphen check | `80 78 05 2D` | `cmp byte ptr [eax+5], '-'` |
+| Nag page | `<!DOCTYPE` near `<HTML`, then `id="daysLeftText"` | `RT_HTML` id 113, 16,969 bytes at file `0x3D2BB8` |
+| Nag thread proc | `55 8B EC 6A FF 68` after the four zero pushes and the function pointer into `AfxBeginThread` | File `0x73A10`, RVA `0x74610` in 6.43 |
 
 ## Appendix D: discovery worksheet
 
@@ -1102,6 +1182,8 @@ Copy and fill before patching:
     "status_evidence": "",
     "message_wrapper_rva": "",
     "dialog_proc_rva": "",
+    "nag_page_resource": "",
+    "nag_thread_rva": "",
     "exit_sites": [],
     "postquit_sites": [],
     "crypt32_free_site": ""
@@ -1109,6 +1191,7 @@ Copy and fill before patching:
   "patches": {
     "status_sites": [],
     "ui_sites": [],
+    "nag_sites": [],
     "lifecycle_sites": [],
     "crypt32_sites": []
   },
