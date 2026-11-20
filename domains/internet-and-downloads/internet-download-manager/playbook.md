@@ -452,6 +452,18 @@ The 6.43 site is file `0x893A6`. If the call takes pushed arguments, clean them.
 - Patch the builder to return 0, or patch the `ShellExecuteW` call.
 - Check the timer path too. In 6.43 there is a timer that opens the buy page after a delay: file `0x7EA43` patched to `31 C0 90 90 90`, and the timer `ShellExecuteA` call at file `0x914DD` replaced with a `ret 0x18` gadget.
 - The builder itself is patched to `C3` at file `0x7C1A0`.
+- The helper opens it too, and this is the path that repeats. IDMan periodically runs `"<IDMGrHlp.exe>"` with `/ch <counter> /w <hwnd>`; the format string is at file `0x2E5EA8` and the `CreateProcessW` that uses it is at file `0x91755`. The counter lives at `[esi+0x17F4]` and increments on every launch, so the helper gets `/ch 1`, `/ch 2`, `/ch 3`, and so on.
+- Inside `IDMGrHlp.exe` there is exactly one `ShellExecuteA` call, at file `0x545D`: `ShellExecuteA(hwnd, "open", "http://www.internetdownloadmanager.com/buy2.html", NULL, NULL, 1)`. The site redirects that to `https://secure.internetdownloadmanager.com/buy_idm2.html`, which is what the browser history shows.
+- Patch the helper call, not the helper's decision tree. `ShellExecuteA` is stdcall with six arguments, so a `ret 0x18` stub is ABI-correct:
+
+```text
+file 0x545D   FF 15 04 33 44 00  ->  31 C0 C2 18 00 90     ; return 0, pop 24 bytes
+```
+
+- Reproduce before patching: `python tooling/buy-probe.py "<IDMGrHlp.exe>" --seconds 10 --args /ch 3 /w 0`. On the unpatched helper this logs `ShellExecuteA` with the URL and a Chrome `--single-argument` launch; on the patched helper it logs nothing.
+- History confirms the cadence without waiting for it. Copy `%LOCALAPPDATA%\Google\Chrome\User Data\Default\History` and query `visits` joined to `urls` for `buy` rows. The deltas showed 12 to 335 seconds between opens, which matches a self-rescheduling timer rather than a fixed interval.
+- When you watch for it live, filter for browser processes whose command line contains `--single-argument` and an IDM URL. Do not filter on the bare URL text: agent and editor command lines can contain the string and produce false positives.
+- `manifest/6.43b18-helper.json` chains from the already-patched helper (`F5E7360A...`) and produces `C7542237...`, checksum `0x0008828B` at file `0x148`. The helper has its own checksum offset, computed by `patch.py`, not `0x150`.
 
 ### 4.5 Update check
 
@@ -933,7 +945,7 @@ An unquoted path with spaces fails at logon. A leftover autostart entry pointing
 | Registration menu | No window, no warning, no licensed-to |
 | Download | Only `Download File Info` and `Download complete` |
 | Trial nag | No `You have N days left` page on launch or after a transfer; `trial_nag_thread` site present |
-| Buy page | No `buy2.html` or `buy_idm2.html` process |
+| Buy page | No `buy2.html` or `buy_idm2.html` process, and no helper `ShellExecuteA` launch |
 | Update | `LastCheckQU` does not change during a normal launch |
 | Tray | Close hides the window, tray icon remains, process alive |
 | Soak | Alive after 40 minutes in the tray |
@@ -979,7 +991,8 @@ With IDM running, this opens `Download File Info` against the running instance. 
 | Registration window at startup | Status probe returns non-zero, usually 6 | Re-run phase 2, patch that code |
 | Fake-serial warning after a download | Warning function or call sites unpatched | Phase 4.2 |
 | Licensed-to dialog | Licensed-to call unpatched | Phase 4.3 |
-| Buy page opens | URL builder or `ShellExecute` unpatched | Phase 4.4 |
+| Buy page opens | URL builder, `ShellExecute`, or the helper call unpatched | Phase 4.4 |
+| Buy page reopens every few minutes | `IDMGrHlp.exe` still calls `ShellExecuteA`; the `/ch` timer keeps launching it | Phase 4.4, helper site `0x545D` |
 | Update check runs | Check function or timer unpatched | Phase 4.5 |
 | `You have N days left` page appears | Nag thread procedure not stubbed | Phase 4.6, site `0x73A10` |
 | Nag page still appears after the stub | Running instance predates the file replacement, or a second manifest was not applied | Restart IDM, re-check the sha and `trial_nag_thread` in the gate |
@@ -1007,7 +1020,7 @@ Every layer has stable anchors and unstable offsets. Anchors are strings, import
 | Message wrapper | `IDM_emc_` caption, runtime decode | `0x6C9C0`, callers `0x74899` and others | Hook `MessageBoxW`, read the caller offset |
 | Warning | Return 0 suppresses the message | `0x73B60`, `0x93B5F`, `0x74E84` | Xref the wrapper callers |
 | Licensed-to | Formatted confirmation | `0x893A6` | Xref the formatter or the call |
-| Buy page | `buy`, `buy2.html`, `ShellExecute` | `0x7C1A0`, `0x7EA43`, `0x914DD` | Xref the URL and the shell call |
+| Buy page | `buy`, `buy2.html`, `ShellExecute` | `0x7C1A0`, `0x7EA43`, `0x914DD`; helper `0x545D` | Xref the URL and the shell call |
 | Update | `LastCheckQU` | `0x55DD0` | Xref the registry value |
 | Timers | `SetTimer`, interval immediates | `0x6C073`, `0x8DA76`, `0x76666` | Enumerate `SetTimer`, inspect `WM_TIMER` |
 | Quit | `PostQuitMessage` IAT | `0x14E902`, `0xB7E27`, `0xE21BE`, `0xE2647`, `0x25F5A0` | Xref the IAT slot |
@@ -1114,10 +1127,19 @@ The helper `IDMGrHlp.exe` for the same build:
 
 ```text
 file offsets 0x52A1, 0x52C8   FF 15 <MessageBoxA>  ->  31 C0 90 90 90 90
+file offset  0x545D          FF 15 <ShellExecuteA> ->  31 C0 C2 18 00 90
 sha256       F5E7360A0C376247507218AC92392BD8B71AF703...
 ```
 
-Verify the helper hash against your own pristine copy; the manifest does not cover it because the helper changes independently of `IDMan.exe`.
+The first two skips stop the fake-serial dialogs. The third stops the buy-page launch that section 4.4 describes. `manifest/6.43b18-helper.json` covers the third on top of the first two:
+
+```text
+input     F5E7360A0C376247507218AC92392BD8B71AF70376E3BF1058C77AFED575B36D
+output    C7542237250C77E7221AE52F7FC93243EC58CCF0166976B0385F13113C0DE1BF
+checksum  0x0008828B at file 0x148
+```
+
+Verify the helper hash against your own copy; the helper changes independently of `IDMan.exe`.
 
 ## Appendix B: tooling
 
@@ -1129,8 +1151,11 @@ Verify the helper hash against your own pristine copy; the manifest does not cov
 | `tooling/gate.ps1` | Static manifest check plus launch, tray, WER, optional transfer |
 | `manifest/6.43b18.json` | The verified 38-patch manifest |
 | `manifest/6.43b18-nag.json` | Addendum: stub the trial nag thread (section 4.6) |
+| `manifest/6.43b18-helper.json` | Helper addendum: block the buy-page `ShellExecuteA` (section 4.4) |
 | `tooling/nag-probe.py`, `tooling/nag-probe.js` | Spawn under Frida, log windows, classes, registry, shell calls |
 | `tooling/nag-call.py`, `tooling/nag-call.js` | Attempt to force the nag page on demand; documents the MFC-state dead end |
+| `tooling/buy-probe.py`, `tooling/buy-probe.js` | Spawn IDM or the helper under Frida, log every URL or process launch |
+| `tooling/dlgtitles.py` | List dialog resources with their titles |
 | `tooling/sscan.py` | ASCII/byte search with file offsets |
 | `tooling/resources.py` | List PE resources as type/name plus file offset and size |
 | `tooling/strrefs.py` | Find code references to a string by file offset |
@@ -1161,6 +1186,8 @@ Verify the helper hash against your own pristine copy; the manifest does not cov
 | INFINITE interval | `68 FF FF FF 7F` | Replacement for any exit interval |
 | Serial length | `83 F8 17` or `3D 17 00 00 00` | 23 decimal |
 | Hyphen check | `80 78 05 2D` | `cmp byte ptr [eax+5], '-'` |
+| Helper buy-page open | `FF 15 <IAT>` with the verb `open` and `buy2.html` | `IDMGrHlp.exe` file `0x545D`, stub `31 C0 C2 18 00 90` |
+| Helper launcher | format `"%s" /ch %ld /w %I64d` | format file `0x2E5EA8`, `CreateProcessW` call file `0x91755`, counter `[esi+0x17F4]` |
 | Nag page | `<!DOCTYPE` near `<HTML`, then `id="daysLeftText"` | `RT_HTML` id 113, 16,969 bytes at file `0x3D2BB8` |
 | Nag thread proc | `55 8B EC 6A FF 68` after the four zero pushes and the function pointer into `AfxBeginThread` | File `0x73A10`, RVA `0x74610` in 6.43 |
 
@@ -1184,6 +1211,7 @@ Copy and fill before patching:
     "dialog_proc_rva": "",
     "nag_page_resource": "",
     "nag_thread_rva": "",
+    "helper_shellexec_site": "",
     "exit_sites": [],
     "postquit_sites": [],
     "crypt32_free_site": ""
@@ -1192,6 +1220,7 @@ Copy and fill before patching:
     "status_sites": [],
     "ui_sites": [],
     "nag_sites": [],
+    "buy_sites": [],
     "lifecycle_sites": [],
     "crypt32_sites": []
   },

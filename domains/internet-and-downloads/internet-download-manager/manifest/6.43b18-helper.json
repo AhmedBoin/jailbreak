@@ -1,0 +1,19 @@
+{
+  "target": "IDMGrHlp.exe 6.43 build 18, addendum: block the helper's buy-page launch",
+  "applies_to_sha256": "F5E7360A0C376247507218AC92392BD8B71AF70376E3BF1058C77AFED575B36D",
+  "notes": [
+    "Apply to the helper that already carries the two MessageBoxA skips from the playbook.",
+    "IDMan launches the helper on a timer with an incrementing /ch argument; for /ch 3 the helper calls ShellExecuteA(hwnd, 'open', 'http://www.internetdownloadmanager.com/buy2.html', NULL, NULL, 1).",
+    "There is exactly one ShellExecuteA call site, a six-byte indirect call through the IAT slot at 0x443304.",
+    "ShellExecuteA is stdcall with six arguments, so the stub returns 0 and pops 0x18 bytes: xor eax,eax ; ret 0x18.",
+    "The checksum field at file 0x150 is recomputed by the patcher."
+  ],
+  "patches": [
+    {
+      "name": "helper_shellexecute",
+      "offset": "0x545D",
+      "original": "FF 15 04 33 44 00",
+      "patch": "31 C0 C2 18 00 90"
+    }
+  ]
+}

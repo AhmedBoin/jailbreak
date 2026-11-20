@@ -13,11 +13,13 @@ This folder is an executable runbook for an agent, not a fixed patch list. The p
 | `playbook.md` | Phase-based runbook: recon, license, UI, lifecycle, crypt32, helper, build, verify, drift |
 | `manifest/6.43b18.json` | 38 verified patches with original and patch bytes, and the expected output hash |
 | `manifest/6.43b18-nag.json` | Addendum that stubs the trial nag page thread (section 4.6) |
+| `manifest/6.43b18-helper.json` | Helper addendum that blocks the repeating buy-page launch (section 4.4) |
 | `tooling/patch.py` | Applies a manifest, verifies original bytes and overlaps, recomputes the PE checksum, checks `expected_sha256` |
 | `tooling/hook-status.py` | Spawns IDMan under Frida and reports the live status code, dialogs, and exit calls |
 | `tooling/hook-status.js` | The Frida probe body, editable for extra hooks |
 | `tooling/gate.ps1` | Static manifest check plus launch, tray, WER, and optional transfer tests |
 | `tooling/nag-probe.py` | Spawns IDM under Frida and logs windows, classes, registry reads and shell calls |
+| `tooling/buy-probe.py` | Spawns IDM or the helper under Frida and logs every URL or process launch |
 
 ## Quick start
 
@@ -30,6 +32,9 @@ python tooling/patch.py manifest/6.43b18.json "<pristine>\IDMan.exe" "<build>\ID
 
 # 2b. Apply the nag addendum to the manifest output.
 python tooling/patch.py manifest/6.43b18-nag.json "<build>\IDMan.exe" "<build>\IDMan.nag.exe"
+
+# 2c. Patch the helper, which opens the buy page on a timer.
+python tooling/patch.py manifest/6.43b18-helper.json "<build>\IDMGrHlp.exe" "<build>\IDMGrHlp.silent.exe"
 
 # 3. Static and dynamic acceptance on the build copy.
 powershell -File tooling/gate.ps1 -Exe "<build>\IDMan.nag.exe" -Manifest manifest/6.43b18-nag.json -AliveSeconds 20 -TraySeconds 15
@@ -47,6 +52,7 @@ powershell -File tooling/gate.ps1 -Exe "C:\Program Files (x86)\Internet Download
 5. Verify on a copy with `ExePath` set to that copy, then install.
 6. A build is done when the verification matrix passes, including the tray soak and the browser transfer test.
 7. The `You have N days left` page is a separate worker thread, not a message box. If it appears after a passing gate, the nag addendum was not applied (section 4.6).
+8. The repeating buy-page opens come from `IDMGrHlp.exe`, not from `IDMan.exe`. IDMan runs the helper with an incrementing `/ch` argument, and the helper calls `ShellExecuteA` on `buy2.html`. Patch the helper's single call site (section 4.4).
 
 ## Layers
 
@@ -58,7 +64,7 @@ powershell -File tooling/gate.ps1 -Exe "C:\Program Files (x86)\Internet Download
 | Registration UI | Redirect the registration dialog procedure to a cave that closes only that dialog. |
 | Warning and licensed-to | Patch the warning function and the licensed-to call. |
 | Trial nag page | Stub the HTML page thread at `0x73A10` (section 4.6). |
-| Buy page and update | Patch the URL builder, the `ShellExecute` call, and the update check. |
+| Buy page and update | Patch the URL builder, the `ShellExecute` call, the update check, and the helper's buy-page launch. |
 | Lifecycle | Raise the exit timers to INFINITE, neutralize `PostQuitMessage` and `ExitProcess`, hide on `WM_CLOSE`. |
 | Crypt32 | Remove the free, or hold a reference at the entry point. |
 | Helper | Skip the `MessageBox` calls in `IDMGrHlp.exe`. |
@@ -78,6 +84,14 @@ With the nag addendum (`6.43b18-nag.json`):
 ```text
 output    65398CC64E5E2D87C3D54B5141A6EB3720F3302E29B7766CC800CFDC3B6966BC
 checksum  0x006385F5 at file 0x150
+```
+
+`IDMGrHlp.exe` with the buy-page addendum (`6.43b18-helper.json`):
+
+```text
+input     F5E7360A0C376247507218AC92392BD8B71AF70376E3BF1058C77AFED575B36D
+output    C7542237250C77E7221AE52F7FC93243EC58CCF0166976B0385F13113C0DE1BF
+checksum  0x0008828B at file 0x148
 ```
 
 The manifest reproduces the output hash from the pristine file exactly. That comparison is the acceptance test for the manifest itself.
